@@ -1,0 +1,15 @@
+
+# IDE
+.vscode/
+
+# ignore model files
+save/
+
+# ignore log files
+logs/
+
+# ignore cache files
+__pycache__/
+
+# ignore output files
+output/
