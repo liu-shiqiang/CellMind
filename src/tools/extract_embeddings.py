@@ -14,7 +14,6 @@ class ExtractEmbeddingsArgs(BaseModel):
     device: str = Field(default="cuda", description="Device to run inference on: 'cuda' or 'cpu'.")
 
 @tool(
-    name="extract_embeddings_with_scgpt",
     description=(
         "Compute 512-dim cell embeddings with scGPT for the preprocessed AnnData. "
         "If only work_dir is given the function auto-detects <work_dir>/<sample>_preprocessed.h5ad. "
@@ -34,12 +33,12 @@ def extract_embeddings_with_scgpt(
     """
 
     base_file_name = os.path.splitext(os.path.basename(file_path))[0]
-    preprocessed_path = os.path.join(output_dir, f"{base_file_name}_preprocessed.h5ad")
-    embedding_output_path = os.path.join(output_dir, f"{base_file_name}_with_embedding.h5ad")
+    preprocessed_path = os.path.join(work_dir, f"{base_file_name}_preprocessed.h5ad")
+    embedding_output_path = os.path.join(work_dir, f"{base_file_name}_with_embedding.h5ad")
 
     model = ScGPTModelWrapper.from_pretrained(pretrained_model_name_or_path=model_path, device=device)
     adata_emb = model.extract_sample_embedding(
-        adata_or_file=file_path,
+        adata_or_file=preprocessed_path,
         gene_col="gene_name",
         max_length=1200,
         cell_embedding_mode="cls",

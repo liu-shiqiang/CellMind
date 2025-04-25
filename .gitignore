@@ -4,6 +4,7 @@
 
 # ignore model files
 save/
+test/
 
 # ignore log files
 logs/
@@ -13,3 +14,5 @@ __pycache__/
 
 # ignore output files
 output/
+
+test.py
