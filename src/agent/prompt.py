@@ -1,6 +1,6 @@
 FEWSHOT_EXAMPLES = [
         {
-            "user": "Please annotate this h5ad file with cell types.",
+            "user": "Please annotate this h5ad file with cell types.file_path:/data/sample1.h5ad",
             "assistant": (
                 "Plan:\n"
                 "1. Load the h5ad file.\n"
@@ -12,7 +12,7 @@ FEWSHOT_EXAMPLES = [
             ),
         },
         {
-            "user": "Help me analyse this single-cell dataset and report the results.",
+            "user": "Help me analyse this single-cell dataset and report the results.file_path:/data/sample1.h5ad",
             "assistant": (
                 "Plan:\n"
                 "1. Load the h5ad dataset.\n"
