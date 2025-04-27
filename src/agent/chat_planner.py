@@ -12,6 +12,7 @@ from langchain_experimental.plan_and_execute.schema import (
     Step,
 )
 
+from src.agent.tool_registry import TOOLS
 from src.agent.prompt import FEWSHOT_EXAMPLES
 
 SYSTEM_PROMPT = (
@@ -19,12 +20,14 @@ SYSTEM_PROMPT = (
     " Please output the plan starting with the header 'Plan:' "
     "and then followed by a numbered list of steps. "
     "Please make the plan the minimum number of steps required "
+    "For each step, specify the TOOL NAME and its ARGUMENTS in parentheses,"
     "to accurately complete the task. If the task is a question, "
     "the final step should almost always be 'Given the above steps taken, "
     "please respond to the users original question'. "
     "At the end of your plan, say '<END_OF_PLAN>'"
 )
 
+tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in TOOLS)
 
 class PlanningOutputParser(PlanOutputParser):
     """Planning output parser."""
@@ -59,7 +62,7 @@ def load_chat_planner(
     ) 
     prompt_template = ChatPromptTemplate.from_messages(
         [
-            ('system', system_prompt),
+            ('system', system_prompt+"\n\nAvailable tools:\n" + tool_descriptions),
             few_shot_prompt,
             ('human', '{input}'),
         ]
