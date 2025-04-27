@@ -5,4 +5,5 @@ from src.tools.retrieve_cell_context import retrieve_cell_context
 
 TOOLS = [
     load_h5ad_data,
+    extract_embeddings_with_scgpt,
 ]
