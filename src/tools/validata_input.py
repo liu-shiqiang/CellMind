@@ -9,7 +9,6 @@ class ValidateArgs(BaseModel):
 
 
 @tool(
-    name="validate_input_file",
     description=(
         "Verify that the provided file exists on disk and has a '.h5ad' suffix. "
         "Return a JSON object {validated: bool, file_path: str}."
