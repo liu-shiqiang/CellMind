@@ -1,8 +1,10 @@
 import os
+import json
+import torch
+from pathlib import Path
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 
-from src.bio_pretrained_model.data_prep._scgpt_data_processor import ScGPTDataProcessor
 from src.bio_pretrained_model.scgpt._scgpt_model import ScGPTModelWrapper
 import scanpy as sc
 from config.setting import settings
@@ -10,43 +12,52 @@ from config.setting import settings
 class ExtractEmbeddingsArgs(BaseModel):
     preproc_path: str = Field(description="Path to the  *_preprocessed.h5ad file to extract embeddings from.")
     work_dir: str = Field(description="Pre-sample folder created by load_h5ad_data")
-    model_path: str = Field(default=settings.SCGPT_MODEL_DIR,scription="Directory containing scGPT weight and vocab.json.")
-    device: str = Field(default="cuda", description="Device to run inference on: 'cuda' or 'cpu'.")
 
 @tool(
-    description=(
-        "Compute 512-dim cell embeddings with scGPT for the preprocessed AnnData. "
-        "If only work_dir is given the function auto-detects <work_dir>/<sample>_preprocessed.h5ad. "
-        "Writes <sample>_emb.h5ad in the same folder. "
-        "Returns JSON {work_dir, embedding_path, n_cells, n_genes}."
-    ),
+    "extract_embeddings_with_scgpt",
     args_schema=ExtractEmbeddingsArgs
 )
 def extract_embeddings_with_scgpt(
-    file_path: str,
+    preproc_path: str,
     work_dir: str,
-    model_path: str = settings.SCGPT_MODEL_DIR,
-    device: str = "cuda"
 ) -> str:
     """
-    Extract cell embeddings using scGPT model and save the result as a new .h5ad file.
+    Run scGPT to generate 512-dim cell embeddings, merge them into the preprocessed AnnData, and save <sample>_emb.h5ad in *work_dir*.
     """
 
-    base_file_name = os.path.splitext(os.path.basename(file_path))[0]
-    preprocessed_path = os.path.join(work_dir, f"{base_file_name}_preprocessed.h5ad")
-    embedding_output_path = os.path.join(work_dir, f"{base_file_name}_with_embedding.h5ad")
+    work = Path(work_dir).expanduser().resolve()
+    preproc = Path(preproc_path).expanduser().resolve()
 
-    model = ScGPTModelWrapper.from_pretrained(pretrained_model_name_or_path=model_path, device=device)
-    adata_emb = model.extract_sample_embedding(
-        adata_or_file=preprocessed_path,
-        gene_col="gene_name",
-        max_length=1200,
-        cell_embedding_mode="cls",
-        batch_size=64,
-        obs_to_save=None,
-        return_new_adata=True,
+    if not preproc.exists():
+        raise FileNotFoundError(f"Preprocessed file not found: {preproc}")
+    if not work.exists():
+        raise FileNotFoundError(f"Work directory not found: {work}")
+
+    sample_name = work.name
+    emb_path = work / f"{sample_name}_emb.h5ad"
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    try:
+        model = ScGPTModelWrapper.from_pretrained(pretrained_model_name_or_path=settings.SCGPT_MODEL_DIR, device=device)
+        adata_emb = model.extract_sample_embedding(
+            adata_or_file=preproc_path,
+            gene_col="gene_name",
+            max_length=1200,
+            cell_embedding_mode="cls",
+            batch_size=64,
+            obs_to_save=None,
+            return_new_adata=True,
+        )
+
+        adata_preproc = sc.read_h5ad(preproc_path)
+        adata_preproc.obsm["X_scGPT"] = adata_emb.X.copy()
+        adata_preproc.write(emb_path)
+    except Exception as exc:
+        raise RuntimeError(f"scGPT embedding extraction failed: {exc}")from exc
+
+    return json.dumps(
+        {
+            "embeddings_path": str(emb_path)
+        }
     )
-
-    adata_emb.write_h5ad(embedding_output_path)
-
-    return f"Embedding extraction complete. Saved to: {embedding_output_path}"

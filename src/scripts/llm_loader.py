@@ -106,8 +106,6 @@ class ModelLoader:
         model_name = self.model_name.removeprefix('ollama_')
         return ChatOllama(
             model=model_name,
-            temperature=0.3,
-            max_tokens=500,
             base_url='http://localhost:11434'
         )
 
