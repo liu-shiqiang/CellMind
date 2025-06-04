@@ -16,3 +16,9 @@ __pycache__/
 output/
 
 test.py
+
+envs/
+
+data/
+
+chroma_data/

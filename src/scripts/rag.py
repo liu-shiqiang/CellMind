@@ -23,7 +23,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-class BioKnowledgeRAG:
+class BioKnowledgeRag:
     def __init__(
             self,
             vector_store_path: str,
@@ -144,7 +144,7 @@ class BioKnowledgeRAG:
     def query(self,query:str, collection_name:str = None, top_k:int = None):
         """similarity search for query and return top_k results"""
         try:
-            collection = self.vectore if collection_name is None else self.vector_stores[collection_name]
+            collection = self.vector_store if collection_name is None else self.vector_stores[collection_name]
             if collection is None:
                 raise ValueError(f"Vector store{collection_name} is not initialized.")\
             
@@ -169,32 +169,45 @@ class BioKnowledgeRAG:
 
 
 
-        
-
-class ChromaDB:
+    
+class CellRag:
 
     def __init__(self,chromadb_path:str,collection_name:str):
         
         self.client = chromadb.PersistentClient(path=chromadb_path)
         self.collection = self.client.get_or_create_collection(name=collection_name)
 
-    def add(self,adata):
+    def add(self,adata_path: str):
 
-        documents = []
-        metadatas = []
-        ids = []
+        adata = sc.read_h5ad(adata_path)
+        ids = [f"CIMA_{i}" for i in range(adata.n_obs)]
+        metadatas = adata.obs[[
+            "celltype_l1",
+            "celltype_l2",
+            "celltype_l3",
+            "celltype_l4",
+            "final_annotation",
+            "cell_type_ontology_term_id",
+            "sample",
+            "batch",
+            "n_genes_by_counts",
+            "total_counts",
+            "pct_counts_mt"
+        ]].astype(str).to_dict(orient="records")
 
-        for idx, obs in enumerate(adata.obs.itertuples()):
-            doc_text = f"Cluster: {obs.scGPT_clusters}, celltype: {getattr(obs, 'celltype', 'NA')}"
-            documents.append(doc_text)
-            metadatas.append({"cluster": obs.scGPT_clusters, "celltype": getattr(obs, "celltype", "NA")})
-            ids.append(f"cell-{idx}")
+        embedding_key = "X_scgpt"
+        embeddings = adata.obsm[embedding_key]
         try:
-            self.collection.add(
-                embeddings=adata.obsm["X_scgpt"].tolist(),
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids
+            batch_size = 5000
+            for i in range(0, len(ids), batch_size):
+                batch_ids = ids[i:i + batch_size]
+                batch_embeddings = embeddings[i:i + batch_size]
+                batch_metadata = metadatas[i:i + batch_size]
+                
+                self.collection.add(
+                    ids=batch_ids,
+                    embeddings=batch_embeddings.tolist(),
+                    metadatas=batch_metadata
                 )
         except Exception as e:
             raise e
