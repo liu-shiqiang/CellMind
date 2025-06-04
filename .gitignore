@@ -3,8 +3,8 @@
 .vscode/
 
 # ignore model files
-save/
 test/
+save/
 
 # ignore log files
 logs/
@@ -16,8 +16,6 @@ __pycache__/
 output/
 
 test.py
-
-envs/
 
 data/
 
