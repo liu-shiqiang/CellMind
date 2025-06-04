@@ -32,6 +32,7 @@ class ModelLoader:
                                 'ollama_deepseek-r1:1.5b',
                                 'ollama_deepseek-r1:14b',
                                 'ollama_deepseek-r1:32b',
+                                'ollama_mistral:7b'
                                  ]
         self.model = self.load_model()
     
@@ -47,7 +48,7 @@ class ModelLoader:
             raise ValueError(f"not supported model: {self.model_name}")
 
     def load_hf_model(self):
-        model_path = settings.local_MODEL_PATH + self.model_name
+        model_path = settings.LOCAL_MODEL_PATH + self.model_name
         self.logger.info(f"loading hf model: {model_path}")
 
         # try from_model_id method
@@ -106,6 +107,7 @@ class ModelLoader:
         model_name = self.model_name.removeprefix('ollama_')
         return ChatOllama(
             model=model_name,
+            temperature=0.2,
             base_url='http://localhost:11434'
         )
 

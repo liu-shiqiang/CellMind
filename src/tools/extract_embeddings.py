@@ -22,7 +22,7 @@ def extract_embeddings_with_scgpt(
     work_dir: str,
 ) -> str:
     """
-    Run scGPT to generate 512-dim cell embeddings, merge them into the preprocessed AnnData, and save <sample>_emb.h5ad in *work_dir*.
+    Run scGPT model to generate 512-dim cell embeddings, merge them into the preprocessed AnnData, and save <sample>_emb.h5ad in *work_dir*.
     """
 
     work = Path(work_dir).expanduser().resolve()
@@ -51,13 +51,14 @@ def extract_embeddings_with_scgpt(
         )
 
         adata_preproc = sc.read_h5ad(preproc_path)
-        adata_preproc.obsm["X_scGPT"] = adata_emb.X.copy()
+        adata_preproc.obsm["X_scgpt"] = adata_emb.X.copy()
         adata_preproc.write(emb_path)
     except Exception as exc:
         raise RuntimeError(f"scGPT embedding extraction failed: {exc}")from exc
 
     return json.dumps(
         {
+            "work_dir": str(work),
             "embeddings_path": str(emb_path)
         }
     )

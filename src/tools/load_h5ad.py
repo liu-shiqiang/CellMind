@@ -22,7 +22,7 @@ def load_h5ad_data(
     model_path: str = settings.SCGPT_MODEL_DIR,
 ) -> str:
     """
-    Load and Preprocess an h5ad file with scGPT and save results in a dedicated sub-folder.
+    Load and Preprocess an h5ad file and save results in a dedicated sub-folder.
 
     """
     path = Path(file_path).expanduser().resolve()
@@ -53,11 +53,12 @@ def load_h5ad_data(
             raise FileNotFoundError(f"Preprocessing finished but file not found: {preproc_path}")
     except Exception as exc:
         raise RuntimeError(f"scGPT preprocessing failed: {exc}")
-
-    return json.dumps(
-        {
-            "validated": True,
+    
+    result={
             "work_dir": str(work_dir),
             "preproc_path": str(preproc_path),
         }
-    )
+        
+
+    return json.dumps(result)
+    
