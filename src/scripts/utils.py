@@ -26,3 +26,16 @@ def read_scrna_data(file_path):
     except Exception as e:
         print(f"read data failed: {e}")
         return None
+    
+def extract_json_from_response(response):
+    
+    try:
+        code_blocks = re.findall(r"```json(.*?)```", response, re.DOTALL)
+        if code_blocks:
+            return json.loads(code_blocks[0].strip())
+        else:
+            json_like = re.search(r"\{.*\}", response, re.DOTALL)
+            return json.loads(json_like.group()) if json_like else None
+    except Exception as e:
+        print(f"JSON parsing failed: {e}")
+        return None
