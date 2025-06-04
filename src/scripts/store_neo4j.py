@@ -1,6 +1,7 @@
 from neo4j import GraphDatabase
 import csv
 
+
 URI = "neo4j+s://c0651eec.databases.neo4j.io"
 USERNAME = "neo4j"
 PASSWORD = "eWRgS3xons7xBhxaoZM0fr1SJZeANZoS6d_334ykH1k"  
@@ -24,5 +25,6 @@ def load_celltype_markers(csv_path):
 
 load_celltype_markers("/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cell_marker_all.csv")
 driver.close()
+
 
 
