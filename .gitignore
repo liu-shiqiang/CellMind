@@ -4,6 +4,7 @@
 
 # ignore model files
 test/
+save/
 
 # ignore log files
 logs/
