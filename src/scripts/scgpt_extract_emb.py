@@ -52,6 +52,6 @@ def run_scgpt_inference(adata_path):
     return adata_preprocessed
 
 if __name__ == "__main__":
-    adata_path = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cell_type/cima_output/cima_train_vector_db.h5ad"
+    adata_path = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cell_type/CIMA_source_data/output/cima_train_vector_db_final.h5ad"
     run_scgpt_inference(adata_path)
     print(f"Processed data with embeddings saved")
