@@ -11,7 +11,7 @@ from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 
 from src.scripts.utils import extract_json_from_response
-from src.scripts.rag import CellRag
+from src.scripts.rag import CellRag, BioKnowledgeRag
 from config.setting import settings
 
 llm = ChatOllama(model="deepseek-r1:32b", 
@@ -24,51 +24,52 @@ class CellRAGAnnoArgs(BaseModel):
     matched_path: str = Field(description="File that have undergone cell type matching")
     work_dir: str = Field(..., description="Per-sample folder created by load_h5ad_data.")
 
-def build_anno_prompt(clusters_id, retrieved_dos, matched_df):
+def lit_rag(match_text: str, neighbor_text: str) -> str:
+    bioknowledgerag = BioKnowledgeRag(settings.CHROMADB_PERSIST_DIR)
+    bioknowledgerag.init_vector_store(settings.CHROMADB_lit_collection_name)
+    
+    rag_query = f"""
+You are identifying the most likely cell type for a cluster of single-cell RNA-seq data.
 
-    prompt = f"""
-You are responsible for annotating cell types on single-cell RNA-seq data.
-The single-cell data has been preprocessed, using scgpt to extract embeddings, clustering embeddings.
-Now you need to combine external knowledge to determine the cell type of each cluster.
+The cluster expresses the following marker genes:{match_text}
+Its neareast neighbors in the embeddingspaces include cell type : {neighbor_text}
 
-
-
+Retrieve scientific literature that discusses any of these genes in relation to spectific immune or tissue cell types.
 """
+    result = bioknowledgerag.query(rag_query,settings.CHROMADB_lit_collection_name, top_k=5)
 
-def anno_prompt(cluster_id, retrieved_cell_context, matched_df):
+    context = "\n".join([doc.page_content for doc in result])
 
-    marker_genes = matched_df[matched_df["group"] == cluster_id]["names"].tolist()
-    neighbors = [doc for doc in retrieved_cell_context["documents"][0]]
+    return context
+    
 
-    match_info = matched_df[matched_df["group"] == cluster_id]["matched_celltype"].tolist()
-    match_text = ""
-    if match_info and isinstance(match_info[0], list):
-        match_text += "\n\nCell types that match known reference markers (in descending order of matching degree):\n"
-        for celltype, score in match_info[0]:
-            match_text += f"- {celltype} (overlap={score})\n"
+def anno_prompt(cluster_id, match_text, neighbor_text, lit_context) -> str:
 
-    prompt = f"""
-You are responsible for annotating cell types on single-cell RNA-seq data.
-The single-cell data has been preprocessed, using scgpt to extract embeddings, clustering embeddings.
-Now you need to combine external knowledge to determine the cell type of each cluster
+    prompt = f"""You are a domain expert responsible for annotation cell clusters in a single_cell RNA-seq dataset.
+The data has been clustered using scGPT-derived embeddings.
+Now you are given supporting information to help assign a **biologically meaningful cell type** label to cluster {cluster_id}.
 
-Objective: Please assign a unique cell type label (English name) to cluster {cluster_id} based on the following information, and explain the criteria for judgment.
-
-Retrieve neighboring cells:
-{chr(10).join(neighbors)}
-
-The candidate marker genes for this cluster are:
-{', '.join(marker_genes)}
+You will conside the following three sources of evidence:
+1. Nearest neighbor cells from embedding space:
+{neighbor_text}
+2. Marker gene matching to known cell types:
 {match_text}
+3、Knowledge from external literature
+{lit_context}
+4、Your own biologicalprior knowledge
 
-Please output in the following JSON format:
+Please now detetmine the most likeing **Englist cell type name** for cluster{cluster_id},strictly at the L3 hierarchy level,and explain your reasoning briedly based on the above evidence
+
+Output in the following JSON format:
 {{
-"cluster_id": {cluster_id},
-celltype ":"<English name of cell type>",
-reason ":"<Explain the reason>"
+    "cluster_id":{cluster_id},
+    "celltype":"<English name of cell type>",
+    "reason":"<Explain reasoning with reference to markers or neighbors>"
 }}
 
 """
+
+    
     return prompt
         
 
@@ -96,19 +97,59 @@ def annotate_with_cellrag(
     adata = sc.read_h5ad(clustered_path)
     matched_df = pd.read_csv(matched_path)
 
-    db = CellRag(chromadb_path="/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/chroma_data", collection_name="my_collection")
+    db = CellRag(chromadb_path=settings.CHROMADB_PERSIST_DIR, collection_name=settings.CHROMADB_cell_collection_name)
+
 
     cluster_ids = sorted(set(adata.obs["scGPT_clusters"]))
     cluster2celltype = {}
 
     for cluster_id in cluster_ids:
-        mean_emb = adata[adata.obs["scGPT_clusters"] == cluster_id].obsm["X_scGPT"].mean(axis=0).tolist()
-        retrieved_cell_context = db.query(mean_emb, n_results=settings.RETRIVE_TOP_K)
+        mean_emb = adata[adata.obs["scGPT_clusters"] == cluster_id].obsm["X_scgpt"].mean(axis=0).tolist()
+        cellcontext = db.query(mean_emb, n_results=5)
+        print(cellcontext)
 
-        prompt = anno_prompt(cluster_id, retrieved_cell_context, matched_df)
+        cellcontext_meta  = cellcontext.get("metadatas",[[]])[0]
+        print(cellcontext_meta)
+
+        neighbor_text = ""
+        for i, cell in enumerate(cellcontext_meta):
+            sample = cell.get("sample", "Unknown")
+            celltype_l1 = cell.get("celltype_l1","Unknown")
+            celltype_l2 = cell.get("celltype_l2", "Unknown")
+            celltype_l3 = cell.get("celltype_l3","Unknown")
+            celltype_l4 = cell.get("final_annotation", "Unknown")
+            n_genes = cell.get("n_genes_by_counts","?")
+            total_counts = cell.get("total_counts","?")
+            neighbor_text += f"-Neighbor{i+1}:(L1 = {celltype_l1}, l2 = {celltype_l2}, l3 = {celltype_l3}, L4 = {celltype_l4}, Sample = {sample}, Gene detected = {n_genes} Total counts = {total_counts})\n"
+        
+        print(neighbor_text)
+
+        candidates = matched_df[matched_df["group"] == int(cluster_id)].to_dict("records")
+
+        print(candidates)
+
+        match_text = ""
+        if candidates:
+            match_text += "Based on the marker gene overlap with known references: \n"
+            for cand in candidates:
+                celltype = cand.get("matched_celltype","Unknown")
+                score = cand.get("score", 0)
+                genes = cand.get("matched_genes","")
+                match_text += f"- {celltype} (Score: {score})\n marker gene mathced:{genes}\n"
+
+        print(match_text)
+        
+        lit_context = lit_rag(match_text=match_text, neighbor_text=neighbor_text)
+
+        print(match_text, neighbor_text, lit_context,sep="\n")
+
+        prompt = anno_prompt(cluster_id, match_text, neighbor_text, lit_context)
+
+        print(prompt)
 
         response = llm.invoke(prompt)
-        sample = work.name
+
+        sample = work.name    
         output_subdir = work / f"{sample}clusters_llm_explanation"
         os.makedirs(output_subdir, exist_ok=True)
 
@@ -158,3 +199,9 @@ def annotate_with_cellrag(
     #     "initial_annotations": initial_annotations,
     #     "low_confidence_clusters": low_confidence_clusters
     # })
+
+if __name__ == "__main__":
+    clustered_path = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/c_data/c_data_clustered.h5ad"
+    matched_path = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/c_data/c_data_matched.csv"
+    work_dir = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/c_data"
+    result = annotate_with_cellrag(clustered_path=clustered_path, matched_path=matched_path, work_dir=work_dir)
