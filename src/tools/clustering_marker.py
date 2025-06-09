@@ -5,7 +5,15 @@ import scanpy as sc
 import pandas as pd
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+from neo4j import GraphDatabase
 from config.setting import settings
+
+
+NEO4J_URI = "neo4j+s://c0651eec.databases.neo4j.io"
+NEO4J_USERNAME = "neo4j"
+NEO4J_PASSWORD = "eWRgS3xons7xBhxaoZM0fr1SJZeANZoS6d_334ykH1k"
+NEO4J_DATABASE = "neo4j"
+
 
 class ClusterMarkerArgs(BaseModel):
     embedding_path: str = Field(..., description="Path to the *_emb.h5ad file with cell embeddings.")
@@ -36,7 +44,7 @@ def cluster_and_rank_markers(
     
     adata = sc.read_h5ad(emb)
 
-    sc.pp.neighbors(adata,use_rep="X_scGPT", n_neighbors=15)
+    sc.pp.neighbors(adata,use_rep="X_scgpt", n_neighbors=15)
 
     sc.tl.leiden(
         adata,
@@ -48,7 +56,7 @@ def cluster_and_rank_markers(
     )
 
     sc.tl.umap(adata)
-    sc.pl.umap(adata,color="scGPT_clusters",save="_umap_scgpt_clustered.png",show=False)
+    sc.pl.umap(adata,color="scGPT_clusters",save=work / "_umap_scgpt_clustered.png",show=False)
 
     adata.var_names = adata.var["gene_name"].astype(str)
     adata.var_names_make_unique()
@@ -62,26 +70,64 @@ def cluster_and_rank_markers(
     result = adata.uns["rank_genes_groups"]
     groups = result["names"].dtype.names
 
-    marker_df = pd.DataFrame({
+    deg_df = pd.DataFrame({
         group: result["names"][group][:100]
         for group in groups
     })
-    marker_df = marker_df.melt(var_name="group", value_name="names")
+    deg_df = deg_df.melt(var_name="group", value_name="names")
 
-    # Using Celltype Markergene reference
-    if settings.MARKER_REFERENCE_PATH:
-            reference_df = pd.read_csv(settings.MARKER_REFERENCE_PATH)
-            reference_grouped = reference_df.groupby("celltype")["markergene"].apply(set).to_dict()
-            # Add an overlap rating column
-            def compute_overlap_score(g):
-                candidate = set(marker_df[marker_df["group"] == g]["names"].tolist())
-                overlaps = {ct: len(candidate & ref_genes) for ct, ref_genes in reference_grouped.items()}
-                return sorted(overlaps.items(), key=lambda x: x[1], reverse=True)
+    def query_neo4j(gene_set: set):
+        query = """
+        UNWIND $genes AS gene_name
+        MATCH (c:CellType)-[:MARKERED_BY]->(g:MarkerGene {name: gene_name})
+        RETURN c.name AS celltype, collect(g.name) AS matched_genes, count(*) AS score
+        ORDER BY score DESC
 
-            marker_df["matched_celltype"] = marker_df["group"].apply(lambda g: compute_overlap_score(g)[:3])
+        """
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+        with driver.session(database=NEO4J_DATABASE) as session:
+            records = session.run(query, genes=list(gene_set))
+            top3 = []
+            for record in records:
+                top3.append({
+                    "celltype": record["celltype"],
+                    "score": record["score"],
+                    "matched_genes": record["matched_genes"]
+                })
+                if len(top3) >= 3:
+                    break
+        driver.close()
+        return top3
+
+    matched_results = []
+    for group in deg_df["group"].unique():
+        gene_list = deg_df[deg_df["group"] == group]["names"].dropna().tolist()
+        gene_set = set(gene_list)
+        match_info = query_neo4j(gene_set)
+        for m in match_info:
+            matched_results.append({
+                "group": group,
+                "matched_celltype": m["celltype"],
+                "score": m["score"],
+                "matched_genes": ",".join(m["matched_genes"])
+            })
+    
+    matched_df = pd.DataFrame(matched_results)
+
+    # # Using Celltype Markergene reference
+    # if settings.MARKER_REFERENCE_PATH:
+    #         reference_df = pd.read_csv(settings.MARKER_REFERENCE_PATH)
+    #         reference_grouped = reference_df.groupby("celltype")["markergene"].apply(set).to_dict()
+    #         # Add an overlap rating column
+    #         def compute_overlap_score(g):
+    #             candidate = set(marker_df[marker_df["group"] == g]["names"].tolist())
+    #             overlaps = {ct: len(candidate & ref_genes) for ct, ref_genes in reference_grouped.items()}
+    #             return sorted(overlaps.items(), key=lambda x: x[1], reverse=True)
+
+    #         marker_df["matched_celltype"] = marker_df["group"].apply(lambda g: compute_overlap_score(g)[:3])
 
     
-    marker_df.to_csv(matched_path, index=False)
+    matched_df.to_csv(matched_path, index=False)
 
     adata.var.index.name = None
     adata.write_h5ad(clustered_path)

@@ -6,7 +6,6 @@ import argparse
 from pathlib import Path
 
 from src.scripts.utils import get_data_path, read_scrna_data
-from src.agent.planner_executor import Agent
 from src.agent.agent1 import build_graph
 from src.scripts.llm_loader import ModelLoader
 from config.setting import settings
