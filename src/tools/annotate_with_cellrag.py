@@ -19,10 +19,6 @@ llm = ChatOllama(model="deepseek-r1:32b",
                  base_url="http://localhost:11434"
                  )
 
-class CellRAGAnnoArgs(BaseModel):
-    clustered_path: str = Field(description="Path to the clustered AnnData h5ad file.")
-    matched_path: str = Field(description="File that have undergone cell type matching")
-    work_dir: str = Field(..., description="Per-sample folder created by load_h5ad_data.")
 
 def lit_rag(match_text: str, neighbor_text: str) -> str:
     bioknowledgerag = BioKnowledgeRag(settings.CHROMADB_PERSIST_DIR)
@@ -69,9 +65,14 @@ Output in the following JSON format:
 
 """
 
-    
+
     return prompt
         
+class CellRAGAnnoArgs(BaseModel):
+    clustered_path: str = Field(description="Path to the clustered AnnData h5ad file.")
+    matched_path: str = Field(description="File that have undergone cell type matching")
+    work_dir: str = Field(..., description="Per-sample folder created by load_h5ad_data.")
+
 
 @tool(
     "annotate_with_cellrag",
@@ -169,6 +170,7 @@ def annotate_with_cellrag(
 
     print("\n All cluster annotations have been completed and saved to cluster_celltype_map.json")
     adata.obs["scGPT_celltype"] = adata.obs["scGPT_clusters"].astype(str).map(cluster2celltype)
+    adata.write_h5ad(work / f"{sample}_annotated.h5ad")
     anno_umap_path = work / f"{sample}_llm_celltypes.png"
     sc.pl.umap(adata, color="scGPT_celltype", save=anno_umap_path, show=False)
     print(" UMAP visualization image of cell types with LLM annotations generated ")

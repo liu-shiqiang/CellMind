@@ -13,6 +13,10 @@ class Settings:
     singlecell_path: str = "/home/share/huadjyin/home/liushiqiang/Projects/Blada/data/cell_type/immune"
     GENEFORMER_MODEL_PATH: str = "/models/geneformer"
     RETRIVE_TOP_K:int = 3
+    NEO4J_URI = "neo4j+s://c0651eec.databases.neo4j.io"
+    NEO4J_USERNAME = "neo4j"
+    NEO4J_PASSWORD = "eWRgS3xons7xBhxaoZM0fr1SJZeANZoS6d_334ykH1k"
+    NEO4J_DATABASE = "neo4j"
 
 
 settings = Settings() 

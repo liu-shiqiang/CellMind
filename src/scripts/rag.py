@@ -35,7 +35,7 @@ class BioKnowledgeRag:
         self.embedding_model = embedding_model
         self.top_k = top_k
         self.embeddings = HuggingFaceEmbeddings(
-            model_name='sentence-transformers/'+embedding_model
+            model_name='/home/share/huadjyin/home/liushiqiang/pretrained_model/all-MiniLM-L6-v2'
         )
         self.vector_stores: Dict[str, Chroma] = {}
 
