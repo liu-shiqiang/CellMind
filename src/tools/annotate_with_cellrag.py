@@ -38,8 +38,20 @@ Retrieve scientific literature that discusses any of these genes in relation to 
 
     return context
     
+def extract_predined_celltypes(db,celltype_level: str = "celltype_l3") -> list[str]:
+    
+    all_metadata = db.get_all_metadata()  # Must return list of dicts
 
-def anno_prompt(cluster_id, match_text, neighbor_text, lit_context) -> str:
+    # Extract non-null, unique celltype names
+    allowed_celltypes = sorted({
+        m[celltype_level].strip()
+        for m in all_metadata
+        if celltype_level in m and m[celltype_level] and isinstance(m[celltype_level], str)
+    })
+
+    return allowed_celltypes
+
+def anno_prompt(cluster_id, match_text, neighbor_text, lit_context, predined_celltype) -> str:
 
     prompt = f"""You are a domain expert responsible for annotation cell clusters in a single_cell RNA-seq dataset.
 The data has been clustered using scGPT-derived embeddings.
@@ -55,6 +67,9 @@ You will conside the following three sources of evidence:
 4、Your own biologicalprior knowledge
 
 Please now detetmine the most likeing **Englist cell type name** for cluster{cluster_id},strictly at the L3 hierarchy level,and explain your reasoning briedly based on the above evidence
+You MUST choose the cell type from the following predefined list (L3 level cell types):
+{predined_celltype}
+If none are appropriate, choose the **closest** match from this list and explain why.
 
 Output in the following JSON format:
 {{
@@ -100,6 +115,7 @@ def annotate_with_cellrag(
 
     db = CellRag(chromadb_path=settings.CHROMADB_PERSIST_DIR, collection_name=settings.CHROMADB_cell_collection_name)
 
+    predined_celltype = extract_predined_celltypes(db, celltype_level = "celltype_l3")
 
     cluster_ids = sorted(set(adata.obs["scGPT_clusters"]))
     cluster2celltype = {}
@@ -144,7 +160,7 @@ def annotate_with_cellrag(
 
         print(match_text, neighbor_text, lit_context,sep="\n")
 
-        prompt = anno_prompt(cluster_id, match_text, neighbor_text, lit_context)
+        prompt = anno_prompt(cluster_id, match_text, neighbor_text, lit_context, predined_celltype)
 
         print(prompt)
 
@@ -171,13 +187,12 @@ def annotate_with_cellrag(
     print("\n All cluster annotations have been completed and saved to cluster_celltype_map.json")
     adata.obs["scGPT_celltype"] = adata.obs["scGPT_clusters"].astype(str).map(cluster2celltype)
     adata.write_h5ad(work / f"{sample}_annotated.h5ad")
-    anno_umap_path = work / f"{sample}_llm_celltypes.png"
-    sc.pl.umap(adata, color="scGPT_celltype", save=anno_umap_path, show=False)
+    sc.settings.figdir = str(work)
+    sc.pl.umap(adata, color="scGPT_celltype", save="_llm_celltypes.png", show=False)
     print(" UMAP visualization image of cell types with LLM annotations generated ")
 
     return json.dumps({
         "work_dir": str(work),
-        "anno_umap_path": str(anno_umap_path),
         "cluster_celltype_map": str(cluster2celltype_path),
     })   
     # initial_annotations = {}

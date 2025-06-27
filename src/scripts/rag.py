@@ -246,6 +246,11 @@ class CellRag:
                     print (f"Error loading {file_path}: {e}")
         
         print("All the adata files have been added to chroma db.")
+
+    def get_all_metadata(self):
+        
+        all = self.collection.get(include = ['metadatas'], limit = None)
+        return all["metadatas"]
                 
 
 

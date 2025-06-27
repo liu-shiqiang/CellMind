@@ -41,6 +41,7 @@ def cluster_and_rank_markers(
     sample = work.name
     clustered_path = work / f"{sample}_clustered.h5ad"
     matched_path = work / f"{sample}_matched.csv"
+    sc.settings.figdir = str(work)
     
     adata = sc.read_h5ad(emb)
 
@@ -49,14 +50,14 @@ def cluster_and_rank_markers(
     sc.tl.leiden(
         adata,
         key_added="scGPT_clusters",
-        resolution=0.5,
+        resolution=2.0,
         flavor="igraph",
         n_iterations=2,
         directed=False
     )
 
     sc.tl.umap(adata)
-    sc.pl.umap(adata,color="scGPT_clusters",save=work / "_umap_scgpt_clustered.png",show=False)
+    sc.pl.umap(adata,color="scGPT_clusters",save="_umap_scgpt_clustered.png",show=False)
 
     adata.var_names = adata.var["gene_name"].astype(str)
     adata.var_names_make_unique()
@@ -65,6 +66,7 @@ def cluster_and_rank_markers(
         adata,
         groupby="scGPT_clusters",
         method="wilcoxon",
+        layer='X_log1p'
     )
 
     result = adata.uns["rank_genes_groups"]
