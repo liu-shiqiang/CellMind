@@ -5,6 +5,7 @@ from typing import Annotated, List, Tuple,Union
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 from typing import Literal
+import logging
 
 from langchain import hub
 from langchain_ollama import ChatOllama
@@ -17,6 +18,9 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent.prompt import FEWSHOT_EXAMPLES
 from src.agent.tool_registry import TOOLS
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 memory = MemorySaver()
 
@@ -48,7 +52,6 @@ class PlanExecute(TypedDict):
 
 class Plan(BaseModel):
     """Plan to follow in future"""
-
     steps: List[str] = Field(
         description="different steps to follow, should be in sorted order"
     )
