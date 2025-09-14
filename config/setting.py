@@ -10,6 +10,7 @@ class Settings:
     OUTPUT_DIR = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output"
     SCGPT_MODEL_DIR = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/save/scgpt/scgpt_human"
     MARKER_REFERENCE_PATH: str = "/home/share/huadjyin/home/liushiqiang/Projects/Blada/data/cell_marker_all.csv"
+    MARKER_GENE_FILE: str = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cell_type/cell_marker/blood.csv"
     singlecell_path: str = "/home/share/huadjyin/home/liushiqiang/Projects/Blada/data/cell_type/immune"
     GENEFORMER_MODEL_PATH: str = "/models/geneformer"
     RETRIVE_TOP_K:int = 3
