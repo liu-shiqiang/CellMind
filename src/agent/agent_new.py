@@ -20,7 +20,7 @@ from langgraph.graph import StateGraph, START
 from langgraph.checkpoint.memory import MemorySaver
 
 
-from src.agent.tool_registry import TOOLS
+from src.agent.tool_registry import TOOLS 
 from src.utils.llm_manager import LLMManager
 from src.utils.path_manager import path_manager, extract_paths_from_objective, validate_h5ad_file, create_analysis_work_dir
 
@@ -43,6 +43,7 @@ logger = structlog.get_logger(__name__)
 memory = MemorySaver()
 
 tools = TOOLS
+
 tools_by_name = {tool.name: tool for tool in tools}
 
 llm = ChatOllama(model="qwen3:30b", 
@@ -56,7 +57,7 @@ llm_tool = ChatOllama(model="qwen3:8b",
                  )
 
 llm_with_tools = llm_tool.bind_tools(tools)
-
+print("LLM绑定的工具名称：", [tool["function"]["name"] for tool in llm_with_tools.kwargs["tools"]])
 class Intent(BaseModel):
     """Intent recognition schema"""
     description: str = Field(description="Detailed task description")
@@ -206,6 +207,9 @@ IMPORTANT:
 - Each step should map to one of the available tools.
 - Steps must be in execution order.
 - Do not skip any essential step.
+
+
+
 """
     max_attempts = 3
     plan_generation_success = False
@@ -683,7 +687,7 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         objective=objective,
         messages=[],
         input_files=input_files or [],
-        intent={},
+        intent=[],
         plan=[],
         next_step=None,
         
@@ -708,7 +712,24 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
 if __name__ == "__main__":
     import asyncio
     
-    # 测试用例
+# 修改测试用例：明确任务目标
+    test_objectives = [
+        "从输入的scRNA-seq数据中获取CD8-positive, alpha-beta cytotoxic T cell的Top50 Marker基因，并对这些基因进行通路富集分析"
+    ]
+    
+    for i, objective in enumerate(test_objectives):
+        print(f"\n=== 测试用例 {i+1} ===")
+        print(f"输入任务: {objective}")
+        # 输入文件：替换为你的h5ad文件路径
+        files = ["/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/test_l3_stratified_5pct/test_l3_stratified_5pct_annotated.h5ad"]
+        result = asyncio.run(run_objective(objective, files))
+        print(f"结果: {result}")
+        print("=" * 50)
+
+
+
+        '''
+   # 测试用例
     test_objectives = [
         # "对scRNA-seq数据进行预处理",
         "Annotate cell types on scRNA seq data",
@@ -726,3 +747,4 @@ if __name__ == "__main__":
         result = asyncio.run(run_objective(objective, files))
         print(f"结果: {result}")
         print("=" * 50)
+        '''
