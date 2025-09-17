@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List
-from .data_repository import ScientificAbstract
+from src.scripts.pubmed_rag.data_repository.models import ScientificAbstract
 
 
 class AbstractRetriever(ABC):
