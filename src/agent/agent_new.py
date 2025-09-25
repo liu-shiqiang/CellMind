@@ -658,6 +658,7 @@ def build_graph():
         {
             "general_executor": "general_executor", # For retries or continuing plan
             "replanner": "intelligent_replanner",
+            "response": "response",
         }
     )
 
@@ -742,7 +743,7 @@ if __name__ == "__main__":
         print(f"\n=== 测试用例 {i+1} ===")
         print(f"输入: {objective}")
         files = [
-            "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/scgpt/cell_anno/ms/c_data.h5ad"
+            "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cell_type/CIMA_source_data/output/test_l3_stratified_5pct.h5ad"
         ]
         result = asyncio.run(run_objective(objective, files))
         print(f"结果: {result}")

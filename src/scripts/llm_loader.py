@@ -32,7 +32,8 @@ class ModelLoader:
                                 'ollama_deepseek-r1:1.5b',
                                 'ollama_deepseek-r1:14b',
                                 'ollama_deepseek-r1:32b',
-                                'ollama_mistral:7b'
+                                'ollama_mistral:7b',
+                                'ollama_qwen3:30b'
                                  ]
         self.model = self.load_model()
     
@@ -107,9 +108,13 @@ class ModelLoader:
         model_name = self.model_name.removeprefix('ollama_')
         return ChatOllama(
             model=model_name,
-            temperature=0.2,
-            base_url='http://localhost:11434'
+            temperature=0.6,
+            base_url='http://localhost:11434',
+            extract_reasoning = True,
         )
+
+
+llm = ModelLoader('ollama_qwen3:30b').model
 
         
         
