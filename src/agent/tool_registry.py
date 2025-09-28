@@ -16,6 +16,8 @@ from src.tools.annotate_with_cellrag import annotate_with_cellrag
 from src.tools.get_celltype_markers import get_celltype_markers_langchain 
 from src.tools.gene_set_enrichment_analysis import gene_set_enrichment_analysis
 
+from src.tools.scPAFA_tool import run_scpafa_analysis 
+
 
 TOOLS = [
     load_h5ad_data,
@@ -24,4 +26,5 @@ TOOLS = [
     annotate_with_cellrag,
     get_celltype_markers_langchain, 
     gene_set_enrichment_analysis,
+    run_scpafa_analysis,
 ]
