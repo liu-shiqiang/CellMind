@@ -11,6 +11,7 @@ logs/
 
 # ignore cache files
 __pycache__/
+.__dpc00000000ed89b36c00009425
 
 # ignore output files
 output/
