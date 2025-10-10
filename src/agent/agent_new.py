@@ -98,7 +98,14 @@ async def intent_recognition(state: AgentState) -> AgentState:
     Universal intent recognition: using LLM to dynamically recognize user intent, capable of analyzing multiple user intentions and potential user intentions
     """
     objective = state["objective"]
-    state["messages"].insert(0, HumanMessage(content=f"User dataset available at: {state['input_files'][0]}"))
+    input_files = state.get("input_files", [])
+    if input_files:
+        state["messages"].insert(
+            0,
+            HumanMessage(
+                content=f"User dataset available at: {input_files[0]}"
+            ),
+        )
 
     intent_prompt = """
 You are a helpful biological data analysis assistant responsible for analyzing user intent.
@@ -148,7 +155,14 @@ You can observe the environment and identify potential errors that may occur dur
 Requirement: You must give an answer.
 
 """
-    message = [SystemMessage(content = response_prompt)] + state["messages"]
+    
+    conversation_history = list(state.get("messages", []))
+    if not conversation_history or conversation_history[-1].type != "human":
+        objective = state.get("objective")
+        if objective:
+            conversation_history.append(HumanMessage(content=objective))
+
+    message = [SystemMessage(content = response_prompt)] + conversation_history
     response = llm.invoke(message)
 
     logger.info(f"[Response] Response content: {response.content}")
@@ -334,7 +348,10 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
                 result_str = f"<excute>Tool {tool_name} call result: {str(tool_result)}</excute>"
                 print(f"Tool '{tool_name}' executed successfully.")
 
-                state["plan"] = state["plan"][1:]
+                if state.get("plan"):
+                    state["plan"] = state["plan"][1:]
+                else:
+                    print("Warning: Attempted to advance plan but no steps remain.")
 
                 tool_outputs.append(
                     ToolMessage(
@@ -361,7 +378,11 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
     state["messages"].extend(tool_outputs)
 
     if tool_call_state :
-        state["next_step"] = "general_executor"        
+        remaining_plan = state.get("plan", [])
+        if remaining_plan:
+            state["next_step"] = "general_executor"
+        else:
+            state["next_step"] = "response"    
     else:
         state["next_step"] = "response"
         
@@ -372,7 +393,12 @@ async def general_executor(state: AgentState) -> AgentState:
     """
     Universal executor: executes the current planned step, supports tool invocation and error handling
     """
-    plan = state["plan"]
+    plan = state.get("plan", [])
+    if not plan:
+        print("[General Executor] No remaining plan steps to execute.")
+        state["messages"].append(AIMessage(content="<observation>No remaining plan steps to execute.</observation>"))
+        state["next_step"] = "response"
+        return state
     current_step = plan[0]
     
     messages = state.get("messages", [])
@@ -697,9 +723,9 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
     ):
         for k, v in event.items():
             if k != "__end__":
-                if k == "final_response" and v:
+                if k == "response" and v:
                     logger.info(f"[Agent] 任务完成: {v}")
-                    return v
+                    return v["messages"][-1]
                 elif k == "error_info" and v:
                     logger.error(f"[Agent] 任务失败: {v}")
                     return f"任务执行失败: {v}"
