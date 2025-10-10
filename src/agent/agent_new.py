@@ -23,6 +23,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.agent.tool_registry import TOOLS
 from src.utils.llm_manager import LLMManager
 from src.utils.path_manager import path_manager, extract_paths_from_objective, validate_h5ad_file, create_analysis_work_dir
+from src.memory.conversation_memory import ConversationMemoryStore
 
 
 structlog.configure(
@@ -41,6 +42,7 @@ structlog.configure(
 logger = structlog.get_logger(__name__)
 
 memory = MemorySaver()
+conversation_memory = ConversationMemoryStore()
 
 tools = TOOLS
 tools_by_name = {tool.name: tool for tool in tools}
@@ -86,11 +88,14 @@ class Plan(BaseModel):
 class AgentState(TypedDict):
     """Intelligent agent state, used to support complex tasks and dynamic programming"""
     messages: list[BaseMessage]
-    objective: str                    
-    input_files: List[str]           
+    objective: str
+    input_files: List[str]
     intents: List[Intent]
     plan: List[str]
     next_step: Optional[str]
+    memory_summary: str
+    memory_records: List[Dict[str, Any]]
+    thread_id: str
 
 # User intent recognition
 async def intent_recognition(state: AgentState) -> AgentState:
@@ -706,30 +711,72 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         logger.info(f"[Agent] 输入文件: {input_files}")
     
 
+    thread_id = "1"
+    memory_context = conversation_memory.load_context(thread_id=thread_id, objective=objective)
+    memory_messages = conversation_memory.build_context_messages(memory_context)
+
     initial_state = AgentState(
         objective=objective,
-        messages=[],
+        messages=list(memory_messages),
         input_files=input_files or [],
         intent={},
         plan=[],
         next_step=None,
-        
+        memory_summary=memory_context.summary,
+        memory_records=[record.__dict__ for record in memory_context.records],
+        thread_id=thread_id,
+
     )
 
     graph = build_graph()
+    final_output: Optional[Any] = None
+    final_state: Optional[AgentState] = None
+
     async for event in graph.astream(
-        initial_state, 
-        config={"recursion_limit": 50, "configurable": {"thread_id": "1"}}
+        initial_state,
+        config={"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
     ):
+        should_break = False
         for k, v in event.items():
-            if k != "__end__":
-                if k == "response" and v:
-                    logger.info(f"[Agent] 任务完成: {v}")
-                    return v["messages"][-1]
-                elif k == "error_info" and v:
-                    logger.error(f"[Agent] 任务失败: {v}")
-                    return f"任务执行失败: {v}"
-    
+            if k == "__end__":
+                continue
+
+            final_state = v
+
+            if k == "response" and v:
+                logger.info(f"[Agent] 任务完成: {v}")
+                final_output = v["messages"][-1]
+                should_break = True
+                break
+            if k == "error_info" and v:
+                logger.error(f"[Agent] 任务失败: {v}")
+                final_output = f"任务执行失败: {v}"
+                should_break = True
+                break
+        if should_break:
+            break
+
+    if final_state is not None:
+        messages = final_state.get("messages", [])
+        result_text: Optional[str]
+        if isinstance(final_output, BaseMessage):
+            result_text = getattr(final_output, "content", None)
+        else:
+            result_text = str(final_output) if final_output is not None else None
+
+        conversation_memory.store_conversation(
+            thread_id=thread_id,
+            objective=objective,
+            messages=messages,
+            result_text=result_text,
+            metadata={"input_files": input_files or []},
+        )
+
+    if isinstance(final_output, BaseMessage):
+        return final_output
+    if final_output is not None:
+        return final_output
+
     return "任务执行完成"
 
 if __name__ == "__main__":
