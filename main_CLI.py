@@ -1,18 +1,21 @@
 # coding=utf-8
 
-import os 
+import os
 import re
+import json
 import asyncio
 import scanpy as sc
 import argparse
 from pathlib import Path
 from typing import List, Optional
+from uuid import uuid4
 
 from src.scripts.utils import get_data_path, read_scrna_data
-from src.agent.agent_new import build_graph, run_objective
+from src.agent.agent_new import run_objective
 from src.scripts.llm_loader import ModelLoader
 from config.setting import settings
 from src.utils.path_manager import validate_h5ad_file
+from src.utils.langgraph_stream import run_agent_stream, serialize_message
 
 from rich import print
 
@@ -30,6 +33,12 @@ def parse_args():
                         help='Use RAG or not',
                         default=False,
                         type=bool)
+    parser.add_argument('--stream',
+                        help='Stream planner/executor events in real time',
+                        action='store_true')
+    parser.add_argument('--thread_id',
+                        help='Optional conversation thread identifier',
+                        default=None)
     return parser.parse_args()
 
 
@@ -160,13 +169,47 @@ def main():
     print(f"\nStart executing the task: {user_task}")
     if validated_files:
         print(f"User files: {len(validated_files)} ")
-    
-    try:
-        result = asyncio.run(run_objective(user_task, validated_files))
-        print(f"\nMission accomplished!")
-        print(f"📊 结果: {result}")
-    except Exception as e:
-        print(f"\nTask execution failed: {e}")
+
+    if args.stream:
+        print("\nStreaming agent events...\n")
+
+        async def _stream_objective():
+            run_id = str(uuid4())
+
+            async def _printer(event: dict) -> None:
+                print(json.dumps(event, ensure_ascii=False))
+
+            final_message, error_info = await run_agent_stream(
+                objective=user_task,
+                input_files=validated_files,
+                thread_id=args.thread_id,
+                run_id=run_id,
+                event_handler=_printer,
+            )
+            return final_message, error_info
+
+        try:
+            final_message, error_info = asyncio.run(_stream_objective())
+        except Exception as e:
+            print(f"\nTask execution failed: {e}")
+            return
+
+        if final_message is not None:
+            print("\nMission accomplished!")
+            print("📊 结果:")
+            print(json.dumps(serialize_message(final_message), ensure_ascii=False, indent=2))
+        elif error_info is not None:
+            print("\nTask execution failed:")
+            print(json.dumps(error_info, ensure_ascii=False, indent=2))
+        else:
+            print("\nMission completed without a final response message.")
+    else:
+        try:
+            result = asyncio.run(run_objective(user_task, validated_files))
+            print(f"\nMission accomplished!")
+            print(f"📊 结果: {result}")
+        except Exception as e:
+            print(f"\nTask execution failed: {e}")
 
 
 if __name__ == '__main__':
