@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from src.scripts.utils import get_data_path, read_scrna_data
-from src.agent.agent1 import build_graph, run_objective
+from src.agent.agent_new import build_graph, run_objective
 from src.scripts.llm_loader import ModelLoader
 from config.setting import settings
 from src.utils.path_manager import validate_h5ad_file
