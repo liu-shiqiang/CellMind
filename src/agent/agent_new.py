@@ -3,7 +3,7 @@ import json
 import operator
 from typing import Annotated, List, Tuple, Union, Dict, Any, Optional
 from typing_extensions import TypedDict
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Literal
 import logging
 import structlog
@@ -33,6 +33,62 @@ MEMORY_QUERY_PATTERNS = [
     r"recall\s+(?:the\s+)?(earlier|previous)\s+(?:instructions|task)",
 ]
 
+STATUS_QUERY_PATTERNS = [
+    r"how\s+is\s+(the\s+)?(analysis|task|job|mission)\s+(going|progressing)",
+    r"what\s+is\s+the\s+status\s+of",
+    r"give\s+me\s+an\s+update",
+    r"have\s+you\s+finished",
+]
+
+INTENT_SYNONYMS: Dict[str, str] = {
+    "memory": "memory_query",
+    "memory lookup": "memory_query",
+    "memory_query": "memory_query",
+    "memory retrieval": "memory_query",
+    "remember": "memory_query",
+    "status": "status_check",
+    "status_check": "status_check",
+    "progress": "status_check",
+    "update": "status_check",
+    "direct": "direct_response",
+    "direct_response": "direct_response",
+    "chat": "chitchat",
+    "chitchat": "chitchat",
+    "greeting": "greeting",
+}
+
+ALLOWED_INTENT_TYPES: Tuple[str, ...] = (
+    "cell_annotation",
+    "clustering_analysis",
+    "marker_gene_analysis",
+    "pathway_analysis",
+    "regulatory_network",
+    "differential_expression",
+    "trajectory_analysis",
+    "quality_control",
+    "data_visualization",
+    "generic",
+    "memory_query",
+    "status_check",
+    "direct_response",
+    "clarification",
+    "greeting",
+    "chitchat",
+)
+
+NON_TASK_INTENTS = {"memory_query", "status_check", "direct_response", "clarification", "greeting", "chitchat"}
+
+MIN_TASK_CONFIDENCE = 0.55
+
+DEFAULT_INTENT_DESCRIPTIONS: Dict[str, str] = {
+    "memory_query": "Retrieve prior conversation context or missions from long-term memory.",
+    "status_check": "Report the current status or progress of the active task.",
+    "direct_response": "Answer the user directly without executing analysis tools.",
+    "clarification": "Ask clarifying questions to better understand the request.",
+    "greeting": "Handle conversational greetings without analysis.",
+    "chitchat": "Engage in small talk without triggering tools.",
+}
+
 
 def _looks_like_memory_query(text: str) -> bool:
     """Heuristic detection for questions that should use memory retrieval."""
@@ -48,6 +104,158 @@ def _looks_like_memory_query(text: str) -> bool:
     # Simple fallbacks for shorter prompts
     keywords = {"remember", "memory", "recall", "previous", "last time"}
     return any(keyword in lowered for keyword in keywords)
+
+
+def _looks_like_status_query(text: str) -> bool:
+    if not text:
+        return False
+
+    lowered = text.lower()
+    for pattern in STATUS_QUERY_PATTERNS:
+        if re.search(pattern, lowered):
+            return True
+
+    keywords = {"status", "progress", "update", "finished"}
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _normalize_intent_label(raw_label: Optional[str]) -> str:
+    if not raw_label:
+        return "generic"
+
+    cleaned = raw_label.strip().lower()
+    cleaned = INTENT_SYNONYMS.get(cleaned, cleaned)
+
+    if cleaned not in ALLOWED_INTENT_TYPES:
+        return "generic"
+
+    return cleaned
+
+
+def _is_task_intent(intent: "Intent") -> bool:
+    normalized = _normalize_intent_label(getattr(intent, "intent", None))
+    if normalized in NON_TASK_INTENTS:
+        return False
+    return intent.confidence >= MIN_TASK_CONFIDENCE
+
+
+def _sanitize_intent(intent: "Intent") -> "Intent":
+    intent_dict = intent.model_dump()
+    normalized_label = _normalize_intent_label(intent_dict.get("intent"))
+    description = intent_dict.get("description") or DEFAULT_INTENT_DESCRIPTIONS.get(normalized_label, "")
+    justification = intent_dict.get("justification") or description or ""
+    dependencies = intent_dict.get("dependencies") or []
+
+    sanitized = Intent(
+        intent=normalized_label,
+        description=description,
+        confidence=intent_dict.get("confidence", 0.0),
+        dependencies=list(dependencies),
+        justification=justification,
+    )
+    return sanitized
+
+
+def _postprocess_intent_response(response: "IntentResponse") -> "IntentResponse":
+    sanitized_intents: List[Intent] = []
+    for intent in response.intents:
+        try:
+            sanitized_intents.append(_sanitize_intent(intent))
+        except ValidationError as exc:
+            logger.warning("[Intent Recognition] Dropped malformed intent: %s", exc)
+
+    if not sanitized_intents:
+        sanitized_intents.append(
+            Intent(
+                intent="direct_response",
+                description=DEFAULT_INTENT_DESCRIPTIONS["direct_response"],
+                confidence=0.0,
+                dependencies=[],
+                justification="No actionable intents remained after validation.",
+            )
+        )
+
+    response.intents = sanitized_intents
+    task_intents = [intent for intent in sanitized_intents if _is_task_intent(intent)]
+    response.is_task = bool(task_intents)
+    return response
+
+
+def _fallback_direct_response(reason: str) -> "IntentResponse":
+    logger.info("[Intent Recognition] Falling back to direct response: %s", reason)
+    fallback_intent = Intent(
+        intent="direct_response",
+        description=DEFAULT_INTENT_DESCRIPTIONS["direct_response"],
+        confidence=0.0,
+        dependencies=[],
+        justification=f"Fallback because structured intent parsing failed: {reason}",
+    )
+    return IntentResponse(intents=[fallback_intent], is_task=False)
+
+
+def _rule_based_intent(objective: str) -> Optional["IntentResponse"]:
+    if _looks_like_memory_query(objective):
+        intent = Intent(
+            intent="memory_query",
+            description=DEFAULT_INTENT_DESCRIPTIONS["memory_query"],
+            confidence=1.0,
+            dependencies=[],
+            justification="Detected memory retrieval phrasing in the request.",
+        )
+        return IntentResponse(intents=[intent], is_task=False)
+
+    if _looks_like_status_query(objective):
+        intent = Intent(
+            intent="status_check",
+            description=DEFAULT_INTENT_DESCRIPTIONS["status_check"],
+            confidence=0.9,
+            dependencies=[],
+            justification="Detected progress inquiry phrasing in the request.",
+        )
+        return IntentResponse(intents=[intent], is_task=False)
+
+    return None
+
+
+def _append_unique_human_message(state: "AgentState", content: str) -> None:
+    if not content:
+        return
+
+    if state["messages"]:
+        last_message = state["messages"][-1]
+        if isinstance(last_message, HumanMessage) and last_message.content == content:
+            return
+
+    state["messages"].append(HumanMessage(content=content))
+
+
+def _apply_intent_result(
+    state: "AgentState",
+    result: "IntentResponse",
+    *,
+    source: str,
+    rationale: str,
+    raw_response: Optional[Any] = None,
+) -> None:
+    task_intents = [intent for intent in result.intents if _is_task_intent(intent)]
+
+    if result.is_task and not task_intents:
+        # Guard against inconsistencies by forcing direct response routing.
+        result.is_task = False
+
+    state["intents"] = task_intents if result.is_task else []
+    state["next_step"] = "planner" if result.is_task else "response"
+    trace_payload = {
+        "objective": state.get("objective"),
+        "source": source,
+        "rationale": rationale,
+        "is_task": result.is_task,
+        "task_intents": [intent.model_dump() for intent in task_intents],
+        "classified_intents": [intent.model_dump() for intent in result.intents],
+        "raw_response": raw_response.model_dump() if hasattr(raw_response, "model_dump") else raw_response,
+    }
+    state["intent_trace"] = trace_payload
+    logger.info("[Intent Recognition] Final decision: %s", trace_payload)
 
 
 def _clean_replanner_output(content: str) -> str:
@@ -126,20 +334,53 @@ llm_with_tools = llm_tool.bind_tools(tools)
 
 class Intent(BaseModel):
     """Intent recognition schema"""
-    description: str = Field(description="Detailed task description")
+
+    model_config = ConfigDict(extra="ignore")
+
+    intent: str = Field(description="Normalized intent label from the allowed catalogue")
+    description: str = Field(default="", description="Detailed task description")
     confidence: float = Field(default=0.8, ge=0, le=1, description="Recognition confidence level (0-1)")
     dependencies: List[str] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="Prerequisite intention of dependency"
     )
+    justification: str = Field(default="", description="Rationale explaining why this label was predicted")
+
+    @field_validator("intent", mode="before")
+    def normalize_intent(cls, v):
+        return _normalize_intent_label(v)
+
+    @field_validator("confidence", mode="before")
+    def clamp_confidence(cls, v):
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            value = 0.0
+        return max(0.0, min(1.0, value))
 
     @field_validator('confidence')
     def round_confidence(cls, v):
         """Confidence level to two decimal places"""
         return round(v, 2)
 
+    @field_validator("dependencies", mode="before")
+    def ensure_dependencies(cls, v):
+        if not v:
+            return []
+        if isinstance(v, list):
+            return [str(item) for item in v]
+        return [str(v)]
+
+    @field_validator("justification", mode="before")
+    def ensure_justification(cls, v, values):
+        if v:
+            return str(v)
+        description = values.get("description", "") if values else ""
+        return description or ""
+
 class IntentResponse(BaseModel):
     """Intent recognition response"""
+    model_config = ConfigDict(extra="ignore")
     intents: List[Intent] = Field(description="List of Identified Intentions")
     is_task: bool = Field(default=True, description="Does the user intend to generate a plan and call tools to complete it")
 
@@ -164,6 +405,7 @@ class AgentState(TypedDict):
     replan_attempts: int
     max_replan_attempts: int
     execution_status: str
+    intent_trace: Dict[str, Any]
 
 # User intent recognition
 async def intent_recognition(state: AgentState) -> AgentState:
@@ -173,61 +415,73 @@ async def intent_recognition(state: AgentState) -> AgentState:
     objective = state["objective"]
     input_files = state.get("input_files", [])
     if input_files:
-        state["messages"].insert(
-            0,
-            HumanMessage(
-                content=f"User dataset available at: {input_files[0]}"
-            ),
-        )
+        dataset_message = f"User dataset available at: {input_files[0]}"
+        if not state["messages"] or not (
+            isinstance(state["messages"][0], HumanMessage)
+            and state["messages"][0].content == dataset_message
+        ):
+            state["messages"].insert(0, HumanMessage(content=dataset_message))
 
-    if _looks_like_memory_query(objective):
-        logger.info("[Intent Recognition] Detected memory retrieval style query; routing to response")
-        state["intents"] = []
-        state["next_step"] = "response"
-        state["messages"].append(HumanMessage(content=objective))
-        state["messages"].append(
-            AIMessage(
-                content="<MEMORY_QUERY>Handled as a direct memory lookup without analysis plan.</MEMORY_QUERY>"
-            )
-        )
+    _append_unique_human_message(state, objective)
+
+    rule_based = _rule_based_intent(objective)
+    if rule_based:
+        rationale = rule_based.intents[0].justification if rule_based.intents else "Rule-based classification"
+        _apply_intent_result(state, rule_based, source="rule", rationale=rationale, raw_response=rule_based)
         return state
 
-    intent_prompt = """
+    allowed_labels_text = ", ".join(ALLOWED_INTENT_TYPES)
+    non_task_text = ", ".join(sorted(NON_TASK_INTENTS))
+    intent_prompt = f"""
 You are a helpful biological data analysis assistant responsible for analyzing user intent.
-Your task is to analyze user intent using a step-by-step approach.
+Classify the latest user instruction and decide whether it requires executing bioinformatics analysis tools.
 
-Firstly, analyze whether the user request requires the execution of bioinformatics analysis tasks. 
-If bioinformatics analysis tasks are not required, the user's intention is determined as a 'direct response'.  
-If bioinformatics analysis tasks are required, analyze the bioinformatics research tasks included in the user request. 
+Return a JSON object that conforms to this schema:
+{{
+  "intents": [
+    {{
+      "intent": "<one of: {allowed_labels_text}>",
+      "description": "Short natural language description of the user's goal",
+      "confidence": 0.0-1.0,
+      "dependencies": ["names of prerequisite intents"],
+      "justification": "Why this label was selected"
+    }}
+  ],
+  "is_task": true | false
+}}
 
-You need to analyze multiple intents that may be included in user requests and label their execution order dependencies.
-
+Guidelines:
+- Use intents from {{{non_task_text}}} for conversational, clarification, status, or memory retrieval requests.
+- Set "is_task" to false when every recognized intent belongs to {{{non_task_text}}}.
+- Only mark "is_task" as true if at least one intent clearly requires running computational analysis.
+- If uncertain, choose the safest non-tool intent and set "is_task" to false.
 """
-    
+
     try:
         intent_llm = llm.with_structured_output(IntentResponse)
-        state["messages"].append(HumanMessage(content=objective)) 
-        messages = [SystemMessage(content = intent_prompt)] + state["messages"]
-        intent_result = intent_llm.invoke(messages)
-        
-        logging.info(f"[Intent Recognition] Intent recognition result: {intent_result}")
+        messages = [SystemMessage(content=intent_prompt)] + state["messages"]
+        raw_result = intent_llm.invoke(messages)
+        logger.info("[Intent Recognition] Raw classifier output: %s", raw_result)
 
-        state["intents"] = intent_result.intents
-        state["messages"].append(AIMessage(content=json.dumps(intent_result.model_dump())))
-        
-        if intent_result.is_task:
-            state["next_step"] = "planner"
-        else:
-            state["next_step"] = "response"
+        processed_result = _postprocess_intent_response(raw_result)
+        _apply_intent_result(
+            state,
+            processed_result,
+            source="llm",
+            rationale="Structured intent classification",
+            raw_response=raw_result,
+        )
 
-        logger.info(f"[Intent Recognition] Correctly identify intent: {intent_result.intents}")
-        
-    except Exception as e:
-        logger.error(f"[Intent Recognition] Intention recognition failed: {e}")
-        error_msg = f"Intention recognition failed: {str(e)}"
-        state["messages"].append(AIMessage(content=error_msg))
-        state["next_step"] = "response"
-    
+    except (ValidationError, OutputParserException, ValueError) as err:
+        logger.error("[Intent Recognition] Intent parsing failed: %s", err)
+        fallback = _fallback_direct_response(str(err))
+        _apply_intent_result(state, fallback, source="fallback", rationale=str(err), raw_response=fallback)
+
+    except Exception as err:
+        logger.exception("[Intent Recognition] Unexpected failure: %s", err)
+        fallback = _fallback_direct_response(str(err))
+        _apply_intent_result(state, fallback, source="fallback", rationale=str(err), raw_response=fallback)
+
     return state
 
 async def response(state: AgentState):
@@ -847,6 +1101,7 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         replan_attempts=0,
         max_replan_attempts=4,
         execution_status="in_progress",
+        intent_trace={},
 
     )
 
