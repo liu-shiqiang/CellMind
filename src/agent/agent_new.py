@@ -3,7 +3,7 @@ import json
 import operator
 from typing import Annotated, List, Tuple, Union, Dict, Any, Optional
 from typing_extensions import TypedDict
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Literal
 import logging
 import structlog
@@ -23,6 +23,280 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.agent.tool_registry import TOOLS
 from src.utils.llm_manager import LLMManager
 from src.utils.path_manager import path_manager, extract_paths_from_objective, validate_h5ad_file, create_analysis_work_dir
+from src.memory.conversation_memory import ConversationMemoryStore
+
+
+MEMORY_QUERY_PATTERNS = [
+    r"what\s+did\s+i\s+ask\s+(you\s+)?(before|last\s+time)",
+    r"remember\s+(our|the)\s+(last|previous)\s+(conversation|task)",
+    r"what\s+was\s+my\s+previous\s+(request|question|mission)",
+    r"recall\s+(?:the\s+)?(earlier|previous)\s+(?:instructions|task)",
+]
+
+STATUS_QUERY_PATTERNS = [
+    r"how\s+is\s+(the\s+)?(analysis|task|job|mission)\s+(going|progressing)",
+    r"what\s+is\s+the\s+status\s+of",
+    r"give\s+me\s+an\s+update",
+    r"have\s+you\s+finished",
+]
+
+INTENT_SYNONYMS: Dict[str, str] = {
+    "memory": "memory_query",
+    "memory lookup": "memory_query",
+    "memory_query": "memory_query",
+    "memory retrieval": "memory_query",
+    "remember": "memory_query",
+    "status": "status_check",
+    "status_check": "status_check",
+    "progress": "status_check",
+    "update": "status_check",
+    "direct": "direct_response",
+    "direct_response": "direct_response",
+    "chat": "chitchat",
+    "chitchat": "chitchat",
+    "greeting": "greeting",
+}
+
+ALLOWED_INTENT_TYPES: Tuple[str, ...] = (
+    "cell_annotation",
+    "clustering_analysis",
+    "marker_gene_analysis",
+    "pathway_analysis",
+    "regulatory_network",
+    "differential_expression",
+    "trajectory_analysis",
+    "quality_control",
+    "data_visualization",
+    "generic",
+    "memory_query",
+    "status_check",
+    "direct_response",
+    "clarification",
+    "greeting",
+    "chitchat",
+)
+
+NON_TASK_INTENTS = {"memory_query", "status_check", "direct_response", "clarification", "greeting", "chitchat"}
+
+MIN_TASK_CONFIDENCE = 0.55
+
+DEFAULT_INTENT_DESCRIPTIONS: Dict[str, str] = {
+    "memory_query": "Retrieve prior conversation context or missions from long-term memory.",
+    "status_check": "Report the current status or progress of the active task.",
+    "direct_response": "Answer the user directly without executing analysis tools.",
+    "clarification": "Ask clarifying questions to better understand the request.",
+    "greeting": "Handle conversational greetings without analysis.",
+    "chitchat": "Engage in small talk without triggering tools.",
+}
+
+
+def _looks_like_memory_query(text: str) -> bool:
+    """Heuristic detection for questions that should use memory retrieval."""
+
+    if not text:
+        return False
+
+    lowered = text.lower()
+    for pattern in MEMORY_QUERY_PATTERNS:
+        if re.search(pattern, lowered):
+            return True
+
+    # Simple fallbacks for shorter prompts
+    keywords = {"remember", "memory", "recall", "previous", "last time"}
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _looks_like_status_query(text: str) -> bool:
+    if not text:
+        return False
+
+    lowered = text.lower()
+    for pattern in STATUS_QUERY_PATTERNS:
+        if re.search(pattern, lowered):
+            return True
+
+    keywords = {"status", "progress", "update", "finished"}
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _normalize_intent_label(raw_label: Optional[str]) -> str:
+    if not raw_label:
+        return "generic"
+
+    cleaned = raw_label.strip().lower()
+    cleaned = INTENT_SYNONYMS.get(cleaned, cleaned)
+
+    if cleaned not in ALLOWED_INTENT_TYPES:
+        return "generic"
+
+    return cleaned
+
+
+def _is_task_intent(intent: "Intent") -> bool:
+    normalized = _normalize_intent_label(getattr(intent, "intent", None))
+    if normalized in NON_TASK_INTENTS:
+        return False
+    return intent.confidence >= MIN_TASK_CONFIDENCE
+
+
+def _sanitize_intent(intent: "Intent") -> "Intent":
+    intent_dict = intent.model_dump()
+    normalized_label = _normalize_intent_label(intent_dict.get("intent"))
+    description = intent_dict.get("description") or DEFAULT_INTENT_DESCRIPTIONS.get(normalized_label, "")
+    justification = intent_dict.get("justification") or description or ""
+    dependencies = intent_dict.get("dependencies") or []
+
+    sanitized = Intent(
+        intent=normalized_label,
+        description=description,
+        confidence=intent_dict.get("confidence", 0.0),
+        dependencies=list(dependencies),
+        justification=justification,
+    )
+    return sanitized
+
+
+def _postprocess_intent_response(response: "IntentResponse") -> "IntentResponse":
+    sanitized_intents: List[Intent] = []
+    for intent in response.intents:
+        try:
+            sanitized_intents.append(_sanitize_intent(intent))
+        except ValidationError as exc:
+            logger.warning("[Intent Recognition] Dropped malformed intent: %s", exc)
+
+    if not sanitized_intents:
+        sanitized_intents.append(
+            Intent(
+                intent="direct_response",
+                description=DEFAULT_INTENT_DESCRIPTIONS["direct_response"],
+                confidence=0.0,
+                dependencies=[],
+                justification="No actionable intents remained after validation.",
+            )
+        )
+
+    response.intents = sanitized_intents
+    task_intents = [intent for intent in sanitized_intents if _is_task_intent(intent)]
+    response.is_task = bool(task_intents)
+    return response
+
+
+def _fallback_direct_response(reason: str) -> "IntentResponse":
+    logger.info("[Intent Recognition] Falling back to direct response: %s", reason)
+    fallback_intent = Intent(
+        intent="direct_response",
+        description=DEFAULT_INTENT_DESCRIPTIONS["direct_response"],
+        confidence=0.0,
+        dependencies=[],
+        justification=f"Fallback because structured intent parsing failed: {reason}",
+    )
+    return IntentResponse(intents=[fallback_intent], is_task=False)
+
+
+def _rule_based_intent(objective: str) -> Optional["IntentResponse"]:
+    if _looks_like_memory_query(objective):
+        intent = Intent(
+            intent="memory_query",
+            description=DEFAULT_INTENT_DESCRIPTIONS["memory_query"],
+            confidence=1.0,
+            dependencies=[],
+            justification="Detected memory retrieval phrasing in the request.",
+        )
+        return IntentResponse(intents=[intent], is_task=False)
+
+    if _looks_like_status_query(objective):
+        intent = Intent(
+            intent="status_check",
+            description=DEFAULT_INTENT_DESCRIPTIONS["status_check"],
+            confidence=0.9,
+            dependencies=[],
+            justification="Detected progress inquiry phrasing in the request.",
+        )
+        return IntentResponse(intents=[intent], is_task=False)
+
+    return None
+
+
+def _append_unique_human_message(state: "AgentState", content: str) -> None:
+    if not content:
+        return
+
+    if state["messages"]:
+        last_message = state["messages"][-1]
+        if isinstance(last_message, HumanMessage) and last_message.content == content:
+            return
+
+    state["messages"].append(HumanMessage(content=content))
+
+
+def _apply_intent_result(
+    state: "AgentState",
+    result: "IntentResponse",
+    *,
+    source: str,
+    rationale: str,
+    raw_response: Optional[Any] = None,
+) -> None:
+    task_intents = [intent for intent in result.intents if _is_task_intent(intent)]
+
+    if result.is_task and not task_intents:
+        # Guard against inconsistencies by forcing direct response routing.
+        result.is_task = False
+
+    state["intents"] = task_intents if result.is_task else []
+    state["next_step"] = "planner" if result.is_task else "response"
+    trace_payload = {
+        "objective": state.get("objective"),
+        "source": source,
+        "rationale": rationale,
+        "is_task": result.is_task,
+        "task_intents": [intent.model_dump() for intent in task_intents],
+        "classified_intents": [intent.model_dump() for intent in result.intents],
+        "raw_response": raw_response.model_dump() if hasattr(raw_response, "model_dump") else raw_response,
+    }
+    state["intent_trace"] = trace_payload
+    logger.info("[Intent Recognition] Final decision: %s", trace_payload)
+
+
+def _clean_replanner_output(content: str) -> str:
+    """Remove common wrappers the LLM may add around JSON output."""
+
+    if not content:
+        return ""
+
+    cleaned = content.strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _parse_replanner_json(raw_content: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Attempt to parse the replanner response into JSON with fallbacks."""
+
+    candidates: List[str] = []
+
+    if raw_content and raw_content.strip():
+        candidates.append(raw_content.strip())
+
+    cleaned = _clean_replanner_output(raw_content)
+    if cleaned and cleaned not in candidates:
+        candidates.append(cleaned)
+
+    brace_match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if brace_match:
+        candidate = brace_match.group(0).strip()
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    last_error: Optional[str] = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate), None
+        except json.JSONDecodeError as err:
+            last_error = str(err)
+
+    return None, last_error
 
 
 structlog.configure(
@@ -41,6 +315,7 @@ structlog.configure(
 logger = structlog.get_logger(__name__)
 
 memory = MemorySaver()
+conversation_memory = ConversationMemoryStore()
 
 tools = TOOLS
 tools_by_name = {tool.name: tool for tool in tools}
@@ -59,20 +334,53 @@ llm_with_tools = llm_tool.bind_tools(tools)
 
 class Intent(BaseModel):
     """Intent recognition schema"""
-    description: str = Field(description="Detailed task description")
+
+    model_config = ConfigDict(extra="ignore")
+
+    intent: str = Field(description="Normalized intent label from the allowed catalogue")
+    description: str = Field(default="", description="Detailed task description")
     confidence: float = Field(default=0.8, ge=0, le=1, description="Recognition confidence level (0-1)")
     dependencies: List[str] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="Prerequisite intention of dependency"
     )
+    justification: str = Field(default="", description="Rationale explaining why this label was predicted")
+
+    @field_validator("intent", mode="before")
+    def normalize_intent(cls, v):
+        return _normalize_intent_label(v)
+
+    @field_validator("confidence", mode="before")
+    def clamp_confidence(cls, v):
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            value = 0.0
+        return max(0.0, min(1.0, value))
 
     @field_validator('confidence')
     def round_confidence(cls, v):
         """Confidence level to two decimal places"""
         return round(v, 2)
 
+    @field_validator("dependencies", mode="before")
+    def ensure_dependencies(cls, v):
+        if not v:
+            return []
+        if isinstance(v, list):
+            return [str(item) for item in v]
+        return [str(v)]
+
+    @field_validator("justification", mode="before")
+    def ensure_justification(cls, v, values):
+        if v:
+            return str(v)
+        description = values.get("description", "") if values else ""
+        return description or ""
+
 class IntentResponse(BaseModel):
     """Intent recognition response"""
+    model_config = ConfigDict(extra="ignore")
     intents: List[Intent] = Field(description="List of Identified Intentions")
     is_task: bool = Field(default=True, description="Does the user intend to generate a plan and call tools to complete it")
 
@@ -86,11 +394,18 @@ class Plan(BaseModel):
 class AgentState(TypedDict):
     """Intelligent agent state, used to support complex tasks and dynamic programming"""
     messages: list[BaseMessage]
-    objective: str                    
-    input_files: List[str]           
+    objective: str
+    input_files: List[str]
     intents: List[Intent]
     plan: List[str]
     next_step: Optional[str]
+    memory_summary: str
+    memory_records: List[Dict[str, Any]]
+    thread_id: str
+    replan_attempts: int
+    max_replan_attempts: int
+    execution_status: str
+    intent_trace: Dict[str, Any]
 
 # User intent recognition
 async def intent_recognition(state: AgentState) -> AgentState:
@@ -100,49 +415,73 @@ async def intent_recognition(state: AgentState) -> AgentState:
     objective = state["objective"]
     input_files = state.get("input_files", [])
     if input_files:
-        state["messages"].insert(
-            0,
-            HumanMessage(
-                content=f"User dataset available at: {input_files[0]}"
-            ),
-        )
+        dataset_message = f"User dataset available at: {input_files[0]}"
+        if not state["messages"] or not (
+            isinstance(state["messages"][0], HumanMessage)
+            and state["messages"][0].content == dataset_message
+        ):
+            state["messages"].insert(0, HumanMessage(content=dataset_message))
 
-    intent_prompt = """
+    _append_unique_human_message(state, objective)
+
+    rule_based = _rule_based_intent(objective)
+    if rule_based:
+        rationale = rule_based.intents[0].justification if rule_based.intents else "Rule-based classification"
+        _apply_intent_result(state, rule_based, source="rule", rationale=rationale, raw_response=rule_based)
+        return state
+
+    allowed_labels_text = ", ".join(ALLOWED_INTENT_TYPES)
+    non_task_text = ", ".join(sorted(NON_TASK_INTENTS))
+    intent_prompt = f"""
 You are a helpful biological data analysis assistant responsible for analyzing user intent.
-Your task is to analyze user intent using a step-by-step approach.
+Classify the latest user instruction and decide whether it requires executing bioinformatics analysis tools.
 
-Firstly, analyze whether the user request requires the execution of bioinformatics analysis tasks. 
-If bioinformatics analysis tasks are not required, the user's intention is determined as a 'direct response'.  
-If bioinformatics analysis tasks are required, analyze the bioinformatics research tasks included in the user request. 
+Return a JSON object that conforms to this schema:
+{{
+  "intents": [
+    {{
+      "intent": "<one of: {allowed_labels_text}>",
+      "description": "Short natural language description of the user's goal",
+      "confidence": 0.0-1.0,
+      "dependencies": ["names of prerequisite intents"],
+      "justification": "Why this label was selected"
+    }}
+  ],
+  "is_task": true | false
+}}
 
-You need to analyze multiple intents that may be included in user requests and label their execution order dependencies.
-
+Guidelines:
+- Use intents from {{{non_task_text}}} for conversational, clarification, status, or memory retrieval requests.
+- Set "is_task" to false when every recognized intent belongs to {{{non_task_text}}}.
+- Only mark "is_task" as true if at least one intent clearly requires running computational analysis.
+- If uncertain, choose the safest non-tool intent and set "is_task" to false.
 """
-    
+
     try:
         intent_llm = llm.with_structured_output(IntentResponse)
-        state["messages"].append(HumanMessage(content=objective)) 
-        messages = [SystemMessage(content = intent_prompt)] + state["messages"]
-        intent_result = intent_llm.invoke(messages)
-        
-        logging.info(f"[Intent Recognition] Intent recognition result: {intent_result}")
+        messages = [SystemMessage(content=intent_prompt)] + state["messages"]
+        raw_result = intent_llm.invoke(messages)
+        logger.info("[Intent Recognition] Raw classifier output: %s", raw_result)
 
-        state["intents"] = intent_result.intents
-        state["messages"].append(AIMessage(content=json.dumps(intent_result.model_dump())))
-        
-        if intent_result.is_task:
-            state["next_step"] = "planner"
-        else:
-            state["next_step"] = "response"
+        processed_result = _postprocess_intent_response(raw_result)
+        _apply_intent_result(
+            state,
+            processed_result,
+            source="llm",
+            rationale="Structured intent classification",
+            raw_response=raw_result,
+        )
 
-        logger.info(f"[Intent Recognition] Correctly identify intent: {intent_result.intents}")
-        
-    except Exception as e:
-        logger.error(f"[Intent Recognition] Intention recognition failed: {e}")
-        error_msg = f"Intention recognition failed: {str(e)}"
-        state["messages"].append(AIMessage(content=error_msg))
-        state["next_step"] = "response"
-    
+    except (ValidationError, OutputParserException, ValueError) as err:
+        logger.error("[Intent Recognition] Intent parsing failed: %s", err)
+        fallback = _fallback_direct_response(str(err))
+        _apply_intent_result(state, fallback, source="fallback", rationale=str(err), raw_response=fallback)
+
+    except Exception as err:
+        logger.exception("[Intent Recognition] Unexpected failure: %s", err)
+        fallback = _fallback_direct_response(str(err))
+        _apply_intent_result(state, fallback, source="fallback", rationale=str(err), raw_response=fallback)
+
     return state
 
 async def response(state: AgentState):
@@ -479,6 +818,22 @@ async def intelligent_replanner(state: AgentState) -> AgentState:
     current_plan: List[str] = state.get("plan", [])
     current_step = current_plan[0] if current_plan else "Unknown or finished step"
 
+    attempts = state.get("replan_attempts", 0)
+    max_attempts = max(1, state.get("max_replan_attempts", 4))
+    if attempts >= max_attempts:
+        error_msg = (
+            "Replanner exceeded maximum retry attempts. Escalating to direct response for user guidance."
+        )
+        logger.error("[Intelligent Replanner] %s", error_msg)
+        state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
+        state["execution_status"] = "failed"
+        state["next_step"] = "response"
+        return state
+
+    state["replan_attempts"] = attempts + 1
+    if "execution_status" not in state or state["execution_status"] == "failed":
+        state["execution_status"] = "in_progress"
+
     formatted_full_history = "\n"
     if messages:
         recect_messages = messages[-10:] if len(messages) > 10 else messages
@@ -560,7 +915,21 @@ Full Conversation History:
         decision_content = decision_message.content.strip()
         print(f"Replanner Decision: {decision_content}")
 
-        decision_data = json.loads(decision_content)
+        decision_data, parse_error = _parse_replanner_json(decision_content)
+        if decision_data is None:
+            error_msg = (
+                f"Failed to parse Replanner's decision after cleanup. Error: {parse_error or 'unknown error'}."
+            )
+            logger.error("[Intelligent Replanner] %s", error_msg)
+            state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
+            fallback_request = (
+                "I'm unable to determine the next action. Could you clarify the required files or instructions to proceed?"
+            )
+            state["messages"].append(AIMessage(content=f"<USER_REQUEST>{fallback_request}</USER_REQUEST>"))
+            state["execution_status"] = "failed"
+            state["next_step"] = "response"
+            return state
+
         action = decision_data.get("action")
 
         if action == "step_completed":
@@ -573,6 +942,11 @@ Full Conversation History:
                 updated_plan = current_plan[1:]
                 state["plan"] = updated_plan
                 print(f"Updated plan: {updated_plan}")
+                if not updated_plan:
+                    state["execution_status"] = "completed"
+                else:
+                    state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
 
         elif action == "request_user_input":
             request_message = decision_data.get("request_message", "Could you please provide more information?")
@@ -580,27 +954,33 @@ Full Conversation History:
             print(f"[Intelligent Replanner] Requesting user input: {request_message} (Reason: {reason})")
 
             state["messages"].append(AIMessage(content=f"<USER_REQUEST>{request_message}</USER_REQUEST>"))
-            
+
             user_input = input(f"f{request_message}")
             state["messages"].append(AIMessage(content=f"<USER_INPUT>{user_input}</USER_INPUT>"))
             print(f"User input received: {user_input}")
             state["next_step"] = "general_executor"
+            state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
 
         elif action == "regenerate_plan":
             new_plan = decision_data.get("new_plan", [])
             reasoning = decision_data.get("reasoning", "No reasoning provided")
-            print(f"[Intelligent Replanner] Regenerating plan: {new_plan} (Reason: {reason})")
+            print(f"[Intelligent Replanner] Regenerating plan: {new_plan} (Reason: {reasoning})")
 
             if not isinstance(new_plan, list) or not new_plan:
                 error_msg = "Replanner generated an invalid or empty new plan."
                 print(f"[Intelligent Replanner] {error_msg}")
                 state["messages"].append(AIMessage(content=f"<PLAN_ERROR>{error_msg}</PLAN_ERROR>"))
                 state["next_step"] = "response"
+                state["execution_status"] = "failed"
+                return state
             plan_summary = "\n".join([f"{i+1}. {step}" for i, step in enumerate(new_plan)])
             observation_content = f"<observation>Replanner generated a new plan. Reasoning: {reasoning}\nNew Plan:\n{plan_summary}</observation>"
             state["messages"].append(AIMessage(content=observation_content))
             state["plan"] = new_plan
             state["next_step"] = "general_executor"
+            state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
         elif action == "continue_plan":
             reasoning = decision_data.get("reasoning", "")
             print(f"Replanner decided plan can continue: {reasoning}")
@@ -608,17 +988,14 @@ Full Conversation History:
             observation_content = f"<observation>Replanner assessed the situation: {reasoning}. Decided to continue with the current plan.</observation>"
             state["messages"].append(AIMessage(content=observation_content))
             state["next_step"] = "general_executor"
+            state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
         else:
             error_msg = f"Replanner returned an invalid action: {action}"
             print(error_msg)
             state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
             state["next_step"] = "replanner"
-        
-    except json.JSONDecodeError as e:
-        error_msg = f"Failed to parse Replanner's JSON decision: {e}. Content: {decision_content[:200]}..."
-        print(error_msg)
-        state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
-        state["next_step"] = "replanner"
+
     except Exception as e:
         error_msg = f"An unexpected error occurred in replanner: {e}"
         print(error_msg)
@@ -626,6 +1003,7 @@ Full Conversation History:
         traceback.print_exc()
         state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
         state["next_step"] = "response"
+        state["execution_status"] = "failed"
     return state
 
 
@@ -706,30 +1084,76 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         logger.info(f"[Agent] 输入文件: {input_files}")
     
 
+    thread_id = "1"
+    memory_context = conversation_memory.load_context(thread_id=thread_id, objective=objective)
+    memory_messages = conversation_memory.build_context_messages(memory_context)
+
     initial_state = AgentState(
         objective=objective,
-        messages=[],
+        messages=list(memory_messages),
         input_files=input_files or [],
-        intent={},
+        intents=[],
         plan=[],
         next_step=None,
-        
+        memory_summary=memory_context.summary,
+        memory_records=[record.__dict__ for record in memory_context.records],
+        thread_id=thread_id,
+        replan_attempts=0,
+        max_replan_attempts=4,
+        execution_status="in_progress",
+        intent_trace={},
+
     )
 
     graph = build_graph()
+    final_output: Optional[Any] = None
+    final_state: Optional[AgentState] = None
+
     async for event in graph.astream(
-        initial_state, 
-        config={"recursion_limit": 50, "configurable": {"thread_id": "1"}}
+        initial_state,
+        config={"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
     ):
+        should_break = False
         for k, v in event.items():
-            if k != "__end__":
-                if k == "response" and v:
-                    logger.info(f"[Agent] 任务完成: {v}")
-                    return v["messages"][-1]
-                elif k == "error_info" and v:
-                    logger.error(f"[Agent] 任务失败: {v}")
-                    return f"任务执行失败: {v}"
-    
+            if k == "__end__":
+                continue
+
+            final_state = v
+
+            if k == "response" and v:
+                logger.info(f"[Agent] 任务完成: {v}")
+                final_output = v["messages"][-1]
+                should_break = True
+                break
+            if k == "error_info" and v:
+                logger.error(f"[Agent] 任务失败: {v}")
+                final_output = f"任务执行失败: {v}"
+                should_break = True
+                break
+        if should_break:
+            break
+
+    if final_state is not None:
+        messages = final_state.get("messages", [])
+        result_text: Optional[str]
+        if isinstance(final_output, BaseMessage):
+            result_text = getattr(final_output, "content", None)
+        else:
+            result_text = str(final_output) if final_output is not None else None
+
+        conversation_memory.store_conversation(
+            thread_id=thread_id,
+            objective=objective,
+            messages=messages,
+            result_text=result_text,
+            metadata={"input_files": input_files or []},
+        )
+
+    if isinstance(final_output, BaseMessage):
+        return final_output
+    if final_output is not None:
+        return final_output
+
     return "任务执行完成"
 
 if __name__ == "__main__":
