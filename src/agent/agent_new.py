@@ -26,6 +26,71 @@ from src.utils.path_manager import path_manager, extract_paths_from_objective, v
 from src.memory.conversation_memory import ConversationMemoryStore
 
 
+MEMORY_QUERY_PATTERNS = [
+    r"what\s+did\s+i\s+ask\s+(you\s+)?(before|last\s+time)",
+    r"remember\s+(our|the)\s+(last|previous)\s+(conversation|task)",
+    r"what\s+was\s+my\s+previous\s+(request|question|mission)",
+    r"recall\s+(?:the\s+)?(earlier|previous)\s+(?:instructions|task)",
+]
+
+
+def _looks_like_memory_query(text: str) -> bool:
+    """Heuristic detection for questions that should use memory retrieval."""
+
+    if not text:
+        return False
+
+    lowered = text.lower()
+    for pattern in MEMORY_QUERY_PATTERNS:
+        if re.search(pattern, lowered):
+            return True
+
+    # Simple fallbacks for shorter prompts
+    keywords = {"remember", "memory", "recall", "previous", "last time"}
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _clean_replanner_output(content: str) -> str:
+    """Remove common wrappers the LLM may add around JSON output."""
+
+    if not content:
+        return ""
+
+    cleaned = content.strip()
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _parse_replanner_json(raw_content: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Attempt to parse the replanner response into JSON with fallbacks."""
+
+    candidates: List[str] = []
+
+    if raw_content and raw_content.strip():
+        candidates.append(raw_content.strip())
+
+    cleaned = _clean_replanner_output(raw_content)
+    if cleaned and cleaned not in candidates:
+        candidates.append(cleaned)
+
+    brace_match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if brace_match:
+        candidate = brace_match.group(0).strip()
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    last_error: Optional[str] = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate), None
+        except json.JSONDecodeError as err:
+            last_error = str(err)
+
+    return None, last_error
+
+
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,
@@ -96,6 +161,9 @@ class AgentState(TypedDict):
     memory_summary: str
     memory_records: List[Dict[str, Any]]
     thread_id: str
+    replan_attempts: int
+    max_replan_attempts: int
+    execution_status: str
 
 # User intent recognition
 async def intent_recognition(state: AgentState) -> AgentState:
@@ -111,6 +179,18 @@ async def intent_recognition(state: AgentState) -> AgentState:
                 content=f"User dataset available at: {input_files[0]}"
             ),
         )
+
+    if _looks_like_memory_query(objective):
+        logger.info("[Intent Recognition] Detected memory retrieval style query; routing to response")
+        state["intents"] = []
+        state["next_step"] = "response"
+        state["messages"].append(HumanMessage(content=objective))
+        state["messages"].append(
+            AIMessage(
+                content="<MEMORY_QUERY>Handled as a direct memory lookup without analysis plan.</MEMORY_QUERY>"
+            )
+        )
+        return state
 
     intent_prompt = """
 You are a helpful biological data analysis assistant responsible for analyzing user intent.
@@ -484,6 +564,22 @@ async def intelligent_replanner(state: AgentState) -> AgentState:
     current_plan: List[str] = state.get("plan", [])
     current_step = current_plan[0] if current_plan else "Unknown or finished step"
 
+    attempts = state.get("replan_attempts", 0)
+    max_attempts = max(1, state.get("max_replan_attempts", 4))
+    if attempts >= max_attempts:
+        error_msg = (
+            "Replanner exceeded maximum retry attempts. Escalating to direct response for user guidance."
+        )
+        logger.error("[Intelligent Replanner] %s", error_msg)
+        state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
+        state["execution_status"] = "failed"
+        state["next_step"] = "response"
+        return state
+
+    state["replan_attempts"] = attempts + 1
+    if "execution_status" not in state or state["execution_status"] == "failed":
+        state["execution_status"] = "in_progress"
+
     formatted_full_history = "\n"
     if messages:
         recect_messages = messages[-10:] if len(messages) > 10 else messages
@@ -565,7 +661,21 @@ Full Conversation History:
         decision_content = decision_message.content.strip()
         print(f"Replanner Decision: {decision_content}")
 
-        decision_data = json.loads(decision_content)
+        decision_data, parse_error = _parse_replanner_json(decision_content)
+        if decision_data is None:
+            error_msg = (
+                f"Failed to parse Replanner's decision after cleanup. Error: {parse_error or 'unknown error'}."
+            )
+            logger.error("[Intelligent Replanner] %s", error_msg)
+            state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
+            fallback_request = (
+                "I'm unable to determine the next action. Could you clarify the required files or instructions to proceed?"
+            )
+            state["messages"].append(AIMessage(content=f"<USER_REQUEST>{fallback_request}</USER_REQUEST>"))
+            state["execution_status"] = "failed"
+            state["next_step"] = "response"
+            return state
+
         action = decision_data.get("action")
 
         if action == "step_completed":
@@ -578,6 +688,11 @@ Full Conversation History:
                 updated_plan = current_plan[1:]
                 state["plan"] = updated_plan
                 print(f"Updated plan: {updated_plan}")
+                if not updated_plan:
+                    state["execution_status"] = "completed"
+                else:
+                    state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
 
         elif action == "request_user_input":
             request_message = decision_data.get("request_message", "Could you please provide more information?")
@@ -585,27 +700,33 @@ Full Conversation History:
             print(f"[Intelligent Replanner] Requesting user input: {request_message} (Reason: {reason})")
 
             state["messages"].append(AIMessage(content=f"<USER_REQUEST>{request_message}</USER_REQUEST>"))
-            
+
             user_input = input(f"f{request_message}")
             state["messages"].append(AIMessage(content=f"<USER_INPUT>{user_input}</USER_INPUT>"))
             print(f"User input received: {user_input}")
             state["next_step"] = "general_executor"
+            state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
 
         elif action == "regenerate_plan":
             new_plan = decision_data.get("new_plan", [])
             reasoning = decision_data.get("reasoning", "No reasoning provided")
-            print(f"[Intelligent Replanner] Regenerating plan: {new_plan} (Reason: {reason})")
+            print(f"[Intelligent Replanner] Regenerating plan: {new_plan} (Reason: {reasoning})")
 
             if not isinstance(new_plan, list) or not new_plan:
                 error_msg = "Replanner generated an invalid or empty new plan."
                 print(f"[Intelligent Replanner] {error_msg}")
                 state["messages"].append(AIMessage(content=f"<PLAN_ERROR>{error_msg}</PLAN_ERROR>"))
                 state["next_step"] = "response"
+                state["execution_status"] = "failed"
+                return state
             plan_summary = "\n".join([f"{i+1}. {step}" for i, step in enumerate(new_plan)])
             observation_content = f"<observation>Replanner generated a new plan. Reasoning: {reasoning}\nNew Plan:\n{plan_summary}</observation>"
             state["messages"].append(AIMessage(content=observation_content))
             state["plan"] = new_plan
             state["next_step"] = "general_executor"
+            state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
         elif action == "continue_plan":
             reasoning = decision_data.get("reasoning", "")
             print(f"Replanner decided plan can continue: {reasoning}")
@@ -613,17 +734,14 @@ Full Conversation History:
             observation_content = f"<observation>Replanner assessed the situation: {reasoning}. Decided to continue with the current plan.</observation>"
             state["messages"].append(AIMessage(content=observation_content))
             state["next_step"] = "general_executor"
+            state["execution_status"] = "in_progress"
+            state["replan_attempts"] = 0
         else:
             error_msg = f"Replanner returned an invalid action: {action}"
             print(error_msg)
             state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
             state["next_step"] = "replanner"
-        
-    except json.JSONDecodeError as e:
-        error_msg = f"Failed to parse Replanner's JSON decision: {e}. Content: {decision_content[:200]}..."
-        print(error_msg)
-        state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
-        state["next_step"] = "replanner"
+
     except Exception as e:
         error_msg = f"An unexpected error occurred in replanner: {e}"
         print(error_msg)
@@ -631,6 +749,7 @@ Full Conversation History:
         traceback.print_exc()
         state["messages"].append(AIMessage(content=f"<REPLAN_ERROR>{error_msg}</REPLAN_ERROR>"))
         state["next_step"] = "response"
+        state["execution_status"] = "failed"
     return state
 
 
@@ -719,12 +838,15 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         objective=objective,
         messages=list(memory_messages),
         input_files=input_files or [],
-        intent={},
+        intents=[],
         plan=[],
         next_step=None,
         memory_summary=memory_context.summary,
         memory_records=[record.__dict__ for record in memory_context.records],
         thread_id=thread_id,
+        replan_attempts=0,
+        max_replan_attempts=4,
+        execution_status="in_progress",
 
     )
 
