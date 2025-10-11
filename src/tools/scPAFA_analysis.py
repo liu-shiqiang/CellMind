@@ -347,4 +347,4 @@ def run_pas_mofa_pipeline(
         "n_samples": n_samples,
         "n_factors": K,
         "output_dir": str(output_dir),
-    }
+    } 

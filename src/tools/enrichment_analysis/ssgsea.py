@@ -19,7 +19,6 @@ class SSGSEAAnalyzer(EnrichmentAnalysiszer):
             ssgsea_results = ssgsea(
                 data=expr,
                 gene_sets=gene_sets,
-                permutation_num=1000, 
                 outdir=None
             )
             
