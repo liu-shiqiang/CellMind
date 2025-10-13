@@ -12,7 +12,7 @@ STREAM_ENDPOINT = f"{API_BASE_URL}/api/v2/agent/stream"
 
 st.set_page_config(page_title="🧬 Cell Annotation Agent", layout="wide")
 
-st.title("🧬 Cell Annotation Agent")
+st.title("🧬 genomix Agent")
 
 # Upload h5ad file
 uploaded_file = st.file_uploader("Upload .h5ad file", type=["h5ad"])
