@@ -1,31 +1,19 @@
 # src/web/api.py
 
+"""API router that exposes both legacy (v1) and new (v2) endpoints."""
 from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import List, Dict, Any
 
-from src.agent.agent1 import build_graph
+from . import routes_v1, routes_v2
 
 router = APIRouter()
 
-class ObjectiveInput(BaseModel):
-    objective: str
+router.include_router(routes_v1.router, prefix="/v1/agent", tags=["agent_v1"])
+router.include_router(routes_v2.router, prefix="/v2/agent", tags=["agent_v2"])
 
-@router.post("/run")
-async def run_agent(input: ObjectiveInput) -> Dict[str, Any]:
-    """Run the LangGraph agent with the provided objective."""
-    result = []
-
-    graph = build_graph()
-    async for event in graph.astream(
-        {"input": input.objective},
-        config={
-            "recursion_limit": 50,
-            "configurable": {"thread_id": "1"},
-        },
-    ):
-        for k, v in event.items():
-            if k != "__end__":
-                result.append({k: v})
-
-    return {"events": result}
+# Backwards compatibility for legacy clients expecting /api/run
+router.add_api_route(
+    "/run",
+    routes_v1.run_agent,
+    methods=["POST"],
+    tags=["agent_v1"],
+)

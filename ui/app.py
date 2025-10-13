@@ -2,9 +2,13 @@
 
 import streamlit as st
 import requests
+import json
 import os
 
-API_URL = "http://localhost:8000/api/run"  # 若部署在远程服务器，请替换 IP
+
+API_BASE_URL = os.environ.get("GENOMIX_AGENT_API", "http://localhost:8000")
+RUN_ENDPOINT = f"{API_BASE_URL}/api/v2/agent/run"
+STREAM_ENDPOINT = f"{API_BASE_URL}/api/v2/agent/stream"
 
 st.set_page_config(page_title="🧬 Cell Annotation Agent", layout="wide")
 
@@ -36,17 +40,56 @@ if st.button("Run Agent"):
         # Call backend API
         with st.spinner("Agent is working..."):
             try:
-                response = requests.post(API_URL, json={"objective": objective})
+                response = requests.post(
+                    RUN_ENDPOINT,
+                    json={
+                        "objective": objective,
+                        "input_files": [os.path.abspath(save_path)],
+                    },
+                    timeout=30,
+                )
                 response.raise_for_status()
-                result = response.json()
+                run_info = response.json()
             except Exception as e:
                 st.error(f"API call failed: {e}")
                 st.stop()
 
-        # Show agent events
+        run_id = run_info.get("run_id")
+        if not run_id:
+            st.error("Backend did not return a run_id")
+            st.stop()
+
         st.subheader("🧠 Agent Events")
-        for event in result.get("events", []):
-            st.json(event)
+        event_container = st.container()
+        event_log = []
+        final_response = None
+        error_payload = None
+
+        try:
+            with requests.get(f"{STREAM_ENDPOINT}/{run_id}", stream=True, timeout=300) as stream_resp:
+                stream_resp.raise_for_status()
+                for raw_line in stream_resp.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    if not raw_line.startswith("data:"):
+                        continue
+                    data_str = raw_line[5:].strip()
+                    if not data_str:
+                        continue
+                    try:
+                        event = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    event_log.append(event)
+                    event_container.json(event)
+                    if event.get("type") == "end":
+                        payload = event.get("payload", {})
+                        final_response = payload.get("response")
+                        error_payload = payload.get("error")
+                        break
+        except Exception as e:
+            st.error(f"Streaming failed: {e}")
+            st.stop()
 
         # Optional: check for output files (umap, json)
         cluster_map_path = os.path.join(os.path.dirname(save_path), "cluster_celltype_map.json")
@@ -61,4 +104,11 @@ if st.button("Run Agent"):
             st.subheader("🖼️ UMAP Visualization")
             st.image(umap_image_path)
 
-        st.success("✅ Annotation completed!")
+        if error_payload:
+            st.error("❌ Task failed")
+            st.json(error_payload)
+        else:
+            st.success("✅ Annotation completed!")
+            if final_response:
+                st.subheader("🧾 Final Response")
+                st.json(final_response)
