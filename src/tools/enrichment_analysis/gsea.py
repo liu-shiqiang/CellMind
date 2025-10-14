@@ -256,3 +256,18 @@ class GSEAFactory(EnrichmentFactory):
     def create_analyzer(self): return GSEAAnalyzer()
     def create_visualizer(self): return GSEAVisualizer()
     def create_evaluator(self): return GSEAEvaluator()
+
+
+if __name__ == '__main__':
+    # 简单测试
+    analyzer = GSEAAnalyzer()
+    result = analyzer.run("test_data/expression.csv", gene_set="KEGG")
+    print(result.top_terms.head())
+
+    visualizer = GSEAVisualizer()
+    plot_path = visualizer.plot(result)
+    print(f"Plot saved to: {plot_path}")
+
+    evaluator = GSEAEvaluator()
+    summary = evaluator.evaluate(result)
+    print(summary)

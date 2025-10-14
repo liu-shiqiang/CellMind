@@ -1,5 +1,7 @@
-from typing import Optional, Dict, Any, List
+from typing import List, Tuple, Dict, Union, Optional, Callable, Any
 
+import difflib,ast
+from collections import OrderedDict
 import pandas as pd
 import scanpy as sc
 import gseapy as gp
@@ -12,80 +14,132 @@ import scipy.sparse as sp
 def extract_gene_list_from_celltype(
     file_path: str,
     celltype_col: str = "pred_celltype",
-    target_celltype: str = "required",
-    top_n: int = 50,
-    method: str = "wilcoxon"
-) -> List[str]:
-    """
-    从单细胞 .h5ad 文件中提取指定细胞类型的 Top N Marker 基因，用于 ORA 分析。
-    
-    参数:
-        file_path (str): 输入的 .h5ad 文件路径
-        celltype_col (str): adata.obs 中的细胞类型注释列名（默认 "pred_celltype"）
-        target_celltype (str): 要提取 marker 的目标细胞类型（必须存在）
-        top_n (int): 返回前 N 个差异最显著的基因（默认 50）
-        method (str): 差异分析方法（如 "wilcoxon", "t-test"；默认 "wilcoxon"）
-    
-    返回:
-        List[str]: 提取的 marker 基因列表，如 ["CD3D", "CD8A", "GZMB", ...]
-    
-    异常:
-        ValueError: 当输入无效（如列不存在、细胞类型不匹配等）时抛出
-    """
-    if target_celltype == "required":
-        raise ValueError("必须指定 target_celltype 参数")
+    target_celltype: Optional[str] = None,    # ← 允许 None：不传则取该列里最多的类别
+    top_n: int = 200,
+    method: str = "wilcoxon",
+    return_info: bool = False,
+    logger: Optional[Callable[[str], None]] = None
+) -> Union[List[str], Tuple[List[str], Dict[str, Any]]]:
 
-    # 1. 读取 adata
+    def _log(msg: str):
+        if logger: logger(msg)
+
     adata = ad.read_h5ad(file_path)
-
-    # 2. 验证注释列和细胞类型
+    obs_cols = list(map(str, adata.obs.columns))
     if celltype_col not in adata.obs.columns:
-        raise ValueError(f"adata.obs 中缺少列 '{celltype_col}'")
-    
-    categories = adata.obs[celltype_col].cat.categories if hasattr(adata.obs[celltype_col], 'cat') else adata.obs[celltype_col].unique()
-    if target_celltype not in categories:
-        raise ValueError(f"目标细胞类型 '{target_celltype}' 不在 '{celltype_col}' 列中。可用类型: {list(categories)}")
+        close_cols = difflib.get_close_matches(celltype_col, obs_cols, n=5, cutoff=0.3)
+        raise ValueError(f"adata.obs 缺少列 '{celltype_col}'；相似：{close_cols or '（无）'}")
 
-    # 3. 自动判断是否需要预处理
+    ser = adata.obs[celltype_col]
+    categories = list(ser.cat.categories) if hasattr(ser, "cat") else sorted(list(map(str, ser.astype(str).unique())))
+
+    # 默认 celltype：该列里数量最多的类别
+    if target_celltype is None:
+        counts = ser.value_counts()
+        if hasattr(ser, "cat"): counts = counts.reindex(ser.cat.categories, fill_value=0)
+        target_celltype = counts.idxmax()
+
+    # 规范化匹配
+    t_raw = str(target_celltype); t_lc = t_raw.lower()
+    cats_lc = [str(c).lower() for c in categories]
+    if t_lc not in cats_lc:
+        close_cats = difflib.get_close_matches(t_raw, list(map(str, categories)), n=10, cutoff=0.3)
+        raise ValueError(f"目标细胞类型 '{t_raw}' 不在 '{celltype_col}'。相近：{close_cats or '（无）'}")
+    target_resolved = str(categories[cats_lc.index(t_lc)])
+    n_cells = int(np.sum(ser.astype(str) == target_resolved))
+
+    # 预处理（略，保持你的原逻辑）
     def _is_log_transformed(X):
-        if sp.issparse(X):
-            X = X.toarray()
+        if sp.issparse(X): X = X.toarray()
         X = np.asarray(X)
-        if X.size == 0:
-            return False
+        if X.size == 0: return False
         try:
-            if np.min(X) < 0 or np.max(X) > 20:
-                return False
-            zero_ratio = np.mean(X <= 0)
-            return zero_ratio <= 0.1
+            if np.min(X) < 0 or np.max(X) > 20: return False
+            return np.mean(X <= 0) <= 0.1
         except Exception:
             return False
 
+    did_norm = did_log1p = False
     if not _is_log_transformed(adata.X):
-        sc.pp.normalize_total(adata, target_sum=1e4)
-        sc.pp.log1p(adata)
+        sc.pp.normalize_total(adata, target_sum=1e4); did_norm = True
+        sc.pp.log1p(adata); did_log1p = True
 
-    # 4. 执行差异分析
+    # 差异分析
     key_added = "_ora_temp_rank_genes"
-    sc.tl.rank_genes_groups(
-        adata,
-        groupby=celltype_col,
-        method=method,
-        key_added=key_added
-    )
+    sc.tl.rank_genes_groups(adata, groupby=celltype_col, method=method, key_added=key_added)
 
-    # 5. 提取结果
+    # 提取 top_n
     try:
-        names = adata.uns[key_added]["names"]
-        markers = names[target_celltype][:top_n].tolist()
-    except Exception as e:
-        raise ValueError(f"提取 marker 基因失败: {e}")
-    finally:
-        # 清理临时结果，避免污染 adata
-        if key_added in adata.uns:
-            del adata.uns[key_added]
+        try:
+            df = sc.get.rank_genes_groups_df(adata, key=key_added)
+            if df is None or df.empty: raise RuntimeError("rank_genes_groups_df 为空")
+            sort_key = "scores" if "scores" in df.columns else "logfoldchanges"
+            sub = df[df["group"] == target_resolved].sort_values(sort_key, ascending=False)
+            markers = sub["names"].head(top_n).astype(str).tolist()
+        except Exception:
+            rg = adata.uns.get(key_added, {})
+            names_obj = rg["names"]
+            if isinstance(names_obj, dict):
+                arr = names_obj[target_resolved]; markers_all = list(map(str, (arr.tolist() if hasattr(arr,"tolist") else list(arr))))
+                markers = markers_all[:top_n]
+            else:
+                groups = list(ser.cat.categories) if hasattr(ser, "cat") else []
+                gi = groups.index(target_resolved)
+                arr_np = np.array(names_obj)
+                col = arr_np[:, gi] if (arr_np.ndim == 2 and arr_np.shape[1] > gi) else (arr_np[gi, :] if arr_np.ndim == 2 else np.array(list(names_obj)).astype(object))
+                markers_all = list(map(str, (col.tolist() if hasattr(col, "tolist") else list(col))))
+                markers = markers_all[:top_n]
 
-    return markers
+        # 展平 + 清洗
+        def _flatten(seq):
+            out = []
+            for g in seq:
+                if isinstance(g, (list, tuple)): out.extend(map(str, g)); continue
+                s = str(g).strip()
+                try:
+                    val = ast.literal_eval(s)
+                    if isinstance(val, (list, tuple)): out.extend(map(str, val)); continue
+                except Exception:
+                    pass
+                if s.startswith("(") and s.endswith(")"): s = s[1:-1]
+                if "," in s:
+                    out.extend([p.strip().strip("'\"") for p in s.split(",") if p.strip()])
+                else:
+                    out.append(s)
+            return out
+
+        def _clean(s):
+            s = str(s).strip()
+            if not s: return None
+            s = s.split(".")[0].replace(" ", "")
+            return s.upper()
+
+        markers = [_clean(m) for m in _flatten(markers)]
+        markers = [m for m in markers if m]
+        markers = list(OrderedDict.fromkeys(markers))
+        if top_n and len(markers) > top_n:
+            markers = markers[:top_n]
+        if not markers:
+            raise ValueError("展平清洗后 marker 为空")
+    finally:
+        if key_added in adata.uns:
+            try: del adata.uns[key_added]
+            except Exception: pass
+
+    info = {
+        "file_path": file_path,
+        "celltype_col": celltype_col,
+        "target_celltype_input": t_raw,
+        "target_celltype_resolved": target_resolved,
+        "n_cells_in_group": n_cells,
+        "method": method,
+        "preprocess": {"normalize_total": did_norm, "log1p": did_log1p},
+        "top_n_requested": top_n,
+        "top_n_returned": len(markers),
+    }
+    _log(f"[extract_gene_list] col='{celltype_col}', group='{target_resolved}', n_cells={n_cells}, top_n={top_n} -> {len(markers)}")
+    return (markers, info) if return_info else markers
+
 
 
 def load_pathway_genesets(db_name: str) -> Dict[str, List[str]]:
@@ -123,10 +177,16 @@ def load_expression(file_path: str) -> pd.DataFrame:
     return df
     
 class AnalysisResult:
-    def __init__(self, top_terms: pd.DataFrame, pvalues: Dict[str, float], 
-                 scores: Optional[pd.DataFrame] = None, 
-                 gene_sets: Optional[Dict[str, List[str]]] = None):
-        self.top_terms = top_terms  # 富集结果表格
-        self.pvalues = pvalues      # 通路p值字典
-        self.scores = scores        # 通路得分矩阵(仅适用于某些方法)
-        self.gene_sets = gene_sets  # 基因集定义(仅适用于某些方法)
+    def __init__(
+        self,
+        top_terms: pd.DataFrame,
+        pvalues: Dict[str, float],
+        scores: Optional[pd.DataFrame] = None,
+        gene_sets: Optional[Dict[str, List[str]]] = None,
+        meta: Optional[Dict[str, Any]] = None,   
+    ):
+        self.top_terms = top_terms
+        self.pvalues = pvalues
+        self.scores = scores
+        self.gene_sets = gene_sets
+        self.meta = meta 

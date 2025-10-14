@@ -58,6 +58,7 @@ class SSGSEAVisualizer(EnrichmentVisualizer):
     def plot(results: AnalysisResult):
         # Implement visualization logic here
         if results.top_terms.empty:
+            
             return "No enriched terms found."
         
         # 创建图表

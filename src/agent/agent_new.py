@@ -455,7 +455,7 @@ Here is the recent conversation history: This provides a complete background of 
                 state["messages"].append(AIMessage(content=f"<EXECUTION_ERROR>{error_msg}</EXECUTION_ERROR>"))
                 state["next_step"] = "general_executor"
             
-            print(f"LLM provided a direct response or requesr for input: {response_content}")
+            print(f"LLM provided a direct response or request for input: {response_content}")
             
             observation_content = f"<observation>LLM response to task '{current_step}':{response_content}</observation>"
             state["messages"].append(AIMessage(content=observation_content))
@@ -494,7 +494,7 @@ async def intelligent_replanner(state: AgentState) -> AgentState:
 
     replan_prompt = f"""
 You are an intelligent replan and analysis agent. Your task is to evaluate why the executor has entered the replanning phase and determine the correct next action.
-The executor was tasked with tperforming the following step in the plan: {current_step} 
+The executor was tasked with performing the following step in the plan: {current_step} 
 It has now entered replanning.This can happen for several reasons:
 1.The step was **successfully completed** (e.g., a tool was called and its result can be observed in the conversation history).
 2.The executor **failed** or encountered an error.
@@ -714,7 +714,7 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         objective=objective,
         messages=[],
         input_files=input_files or [],
-        intent=[],
+        intents=[],
         plan=[],
         next_step=None,
         
