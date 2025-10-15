@@ -4,7 +4,7 @@ import math
 import concurrent.futures
 import asyncio
 from tqdm.asyncio import tqdm
-from typing import List,Dict
+from typing import Any, Dict, Iterable, List, Optional
 
 import scanpy as sc
 
@@ -14,6 +14,8 @@ from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from src.scripts.interpretation_types import RagTopic, RagTopicContext
 
 from src.bio_pretrained_model.data_prep._scgpt_data_processor import ScGPTDataProcessor
 from src.bio_pretrained_model.scgpt._scgpt_model import ScGPTModelWrapper
@@ -167,6 +169,96 @@ class BioKnowledgeRag:
             self.logger.error(f"RAG generation failed: {str(e)}")
             raise e
 
+    async def interpret_topics(
+        self,
+        topics: List[RagTopic],
+        collection_name: Optional[str] = None,
+        top_k: Optional[int] = None,
+        max_concurrency: int = 4,
+    ) -> List[RagTopicContext]:
+        """Retrieve supporting documents for a batch of RAG topics."""
+
+        if not topics:
+            return []
+
+        semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        loop = asyncio.get_running_loop()
+
+        async def _fetch(topic: RagTopic) -> RagTopicContext:
+            async with semaphore:
+                docs: List[Document] = []
+                used_query = topic.query_text
+                queries = [topic.query_text]
+                if topic.metadata:
+                    alternates = topic.metadata.get("alternate_queries")
+                    if isinstance(alternates, list):
+                        queries.extend(str(item) for item in alternates if item)
+                chosen_top_k = topic.metadata.get("top_k") if topic.metadata else None
+                desired_top_k = int(chosen_top_k or top_k or self.top_k)
+
+                for attempt, query in enumerate(queries, 1):
+                    docs = await loop.run_in_executor(
+                        None,
+                        lambda q=query, k=desired_top_k: self.query(
+                            q,
+                            collection_name=collection_name,
+                            top_k=k,
+                        ),
+                    )
+                    if docs:
+                        used_query = query
+                        break
+
+                combined = "\n\n".join(doc.page_content for doc in docs)
+                metadata = {
+                    "attempts": len(queries),
+                    "used_query": used_query,
+                    "top_k": desired_top_k,
+                    "num_documents": len(docs),
+                }
+                if topic.metadata:
+                    metadata.update({f"topic_{key}": value for key, value in topic.metadata.items()})
+
+                return RagTopicContext(
+                    topic=topic,
+                    documents=docs,
+                    combined_context=combined,
+                    metadata=metadata,
+                )
+
+        tasks = [asyncio.create_task(_fetch(topic)) for topic in topics]
+        results = await asyncio.gather(*tasks)
+        return results
+
+    def interpret_topics_sync(
+        self,
+        topics: List[RagTopic],
+        collection_name: Optional[str] = None,
+        top_k: Optional[int] = None,
+        max_concurrency: int = 4,
+    ) -> List[RagTopicContext]:
+        """Synchronous wrapper around :meth:`interpret_topics`."""
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():  # pragma: no cover - defensive branch
+            raise RuntimeError(
+                "interpret_topics_sync cannot be called while an event loop is running; "
+                "await interpret_topics(...) instead."
+            )
+
+        return asyncio.run(
+            self.interpret_topics(
+                topics,
+                collection_name=collection_name,
+                top_k=top_k,
+                max_concurrency=max_concurrency,
+            )
+        )
+
 
 
     
@@ -213,7 +305,7 @@ class CellRag:
             raise e
 
     def query(self, embedding: List[float], n_results: int = 5):
-    
+
         try:
             results = self.collection.query(
                 query_embeddings=[embedding],
@@ -248,9 +340,49 @@ class CellRag:
         print("All the adata files have been added to chroma db.")
 
     def get_all_metadata(self):
-        
+
         all = self.collection.get(include = ['metadatas'], limit = None)
         return all["metadatas"]
+
+
+def find_similar_clusters(
+    cell_rag: CellRag,
+    embedding: Iterable[float],
+    n_results: int = 5,
+) -> List[Dict[str, Any]]:
+    """Query the CellRag index and summarise the top matching cell populations."""
+
+    if embedding is None:
+        return []
+
+    try:
+        response = cell_rag.query(list(embedding), n_results=n_results)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logging.getLogger(__name__).warning("CellRag query failed: %s", exc)
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    ids = response.get("ids", [[]])[0] if isinstance(response.get("ids"), list) else []
+    metadatas = response.get("metadatas", [[]])[0] if isinstance(response.get("metadatas"), list) else []
+    distances = response.get("distances", [[]])[0] if isinstance(response.get("distances"), list) else []
+
+    for idx, metadata in enumerate(metadatas):
+        entry = {
+            "reference_id": ids[idx] if idx < len(ids) else None,
+            "metadata": metadata or {},
+            "distance": distances[idx] if idx < len(distances) else None,
+        }
+        cell_type = None
+        if isinstance(metadata, dict):
+            for key in ("final_annotation", "celltype_l4", "celltype_l3", "celltype_l2", "celltype_l1"):
+                if metadata.get(key):
+                    cell_type = metadata[key]
+                    break
+        if cell_type:
+            entry["cell_type"] = cell_type
+        matches.append(entry)
+
+    return matches
                 
 
 
