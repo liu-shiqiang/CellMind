@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Union, Optional, Callable, Any
+from typing import List, Tuple, Dict, Union, Optional, Callable, Any, Iterable
 
 import difflib,ast
 from collections import OrderedDict
@@ -141,40 +141,186 @@ def extract_gene_list_from_celltype(
     return (markers, info) if return_info else markers
 
 
-
 def load_pathway_genesets(db_name: str) -> Dict[str, List[str]]:
-    """加载通路基因集"""
+    import os
+    from glob import glob
+    import gseapy as gp
 
-    mapping = {'kegg': 'c2.cp.kegg', 'go': 'c5.all', 'hallmark': 'h.all'}
-    
-    if db_name.lower() not in mapping:
-        raise ValueError(f"只支持: {list(mapping.keys())}")
-    
+    name = db_name.lower()
+    ver = getattr(settings, "MSIGDB_VERSION", "7.4")
+    base = getattr(settings, "MSIGDB_PATH", ".")
+
+    preferred = {
+        "kegg":     f"c2.cp.kegg.v{ver}.symbols.gmt",
+        "go":       f"c5.go.bp.v{ver}.symbols.gmt",
+        "hallmark": f"h.all.v{ver}.symbols.gmt",
+    }
+    fallbacks = {
+        "kegg":     ["c2.cp.kegg.symbols.gmt"],
+        "go":       ["c5.go.bp.symbols.gmt"],
+        "hallmark": ["h.all.symbols.gmt"],
+    }
+    fullfile = f"msigdb.v{ver}.symbols.gmt"
+
+    def _read_gmt(path: str) -> Dict[str, List[str]]:
+        return gp.parser.read_gmt(path)
+
+    # 子集本地优先
+    cand = os.path.join(base, preferred.get(name, ""))
+    if os.path.isfile(cand):
+        gs = _read_gmt(cand)
+        print(f"加载 {db_name}（local subset）: {cand}  集合数={len(gs)}")
+        return gs
+
+    for patt in fallbacks.get(name, []):
+        hits = sorted(glob(os.path.join(base, patt)))
+        if hits:
+            gs = _read_gmt(hits[-1])
+            print(f"加载 {db_name}（local fallback）: {hits[-1]}  集合数={len(gs)}")
+            return gs
+
+    # 全集 + 筛选前缀
+    full_path = os.path.join(base, fullfile)
+    if os.path.isfile(full_path):
+        all_sets = _read_gmt(full_path)
+        if name == "kegg":
+            gs = {k: v for k, v in all_sets.items() if str(k).startswith("KEGG_")}
+            if gs:
+                print(f"加载 {db_name}（full -> KEGG 前缀）: {full_path} 数={len(gs)}")
+                return gs
+        elif name == "hallmark":
+            gs = {k: v for k, v in all_sets.items() if str(k).startswith("HALLMARK_")}
+            if gs:
+                print(f"加载 {db_name}（full -> HALLMARK 前缀）: {full_path} 数={len(gs)}")
+                return gs
+        elif name == "go":
+            print("警告：从全集无法可靠区分 GO-BP，建议使用 c5.go.bp 子 GMT")
+
+    # 在线 fallback（不带 outdir 参数）
     msig = gp.Msigdb()
-    genesets = msig.get_gmt(category=mapping[db_name.lower()], dbver=settings.MSIGDB_VERSION)
-    print(f"加载 {db_name}: {len(genesets)} 个基因集")
+    category = {"kegg": "c2.cp.kegg", "go": "c5.go.bp", "hallmark": "h.all"}[name]
+    genesets = msig.get_gmt(category=category, dbver=ver)
+    genesets = {str(k): [_norm_symbol(g) for g in v] for k, v in genesets.items()}
+    print(f"加载 {db_name}（online）集合数={len(genesets)}")
     return genesets
+
     
-def load_expression(file_path: str) -> pd.DataFrame:
-    """加载表达矩阵,支持CSV、TSV和H5AD格式
-        ssGSEA 要求: genes × cells
-        增加检查是否转置
+def _is_log_transformed(X: Any) -> bool:
+    """简单判断矩阵是否已经 log 转换"""
+    if sp.issparse(X):
+        X = X.toarray()
+    X = np.asarray(X)
+    if X.size == 0:
+        return False
+    try:
+        if np.min(X) < 0 or np.max(X) > 20:
+            return False
+        zero_ratio = np.mean(X <= 0)
+        return zero_ratio <= 0.1
+    except Exception:
+        return False
+
+
+def _to_iterable(value: Optional[Iterable[str]]) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+def _norm_symbol(s: str) -> str:
+    s = str(s).strip()
+    if not s: return s
+    s = s.split('.')[0]
+    return s.upper()
+
+def load_expression(
+    file_path: str,
+    celltype_col: Optional[str] = None,
+    target_celltypes: Optional[Iterable[str]] = None,
+    aggregation: str = "mean",
+    min_cells: int = 10,
+    normalize: bool = True,
+) -> pd.DataFrame:
+    """加载用于 ssGSEA 的表达矩阵
+
+    参数:
+        file_path: 输入的表达矩阵文件路径, 支持 csv/tsv/txt/h5ad
+        celltype_col: (可选) 指定 .h5ad 文件中用于分组的细胞类型列
+        target_celltypes: (可选) 仅保留的细胞类型集合
+        aggregation: 在聚合到细胞类型水平时的聚合方法, 支持 "mean" 或 "median"
+        min_cells: 聚合前细胞数量的最小阈值, 低于该阈值的细胞类型将被丢弃
+        normalize: 是否自动对单细胞表达矩阵进行标准化 + log1p 处理
+
+    返回:
+        pd.DataFrame: 基因 × 样本的表达矩阵, 行为基因、列为细胞或细胞类型
     """
+
     if file_path.endswith('.csv'):
         df = pd.read_csv(file_path, index_col=0)
     elif file_path.endswith('.tsv') or file_path.endswith('.txt'):
         df = pd.read_csv(file_path, sep='\t', index_col=0)
     elif file_path.endswith('.h5ad'):
         adata = sc.read_h5ad(file_path)
-        df = adata.to_df()
+
+        if normalize and not _is_log_transformed(adata.X):
+            sc.pp.normalize_total(adata, target_sum=1e4)
+            sc.pp.log1p(adata)
+
+        if celltype_col is not None:
+            if celltype_col not in adata.obs.columns:
+                raise ValueError(f"adata.obs 中缺少列 '{celltype_col}'")
+
+            target_celltypes_list = _to_iterable(target_celltypes)
+            obs_series = adata.obs[celltype_col].astype(str)
+
+            if target_celltypes_list is not None:
+                missing = set(target_celltypes_list) - set(obs_series.unique())
+                if missing:
+                    raise ValueError(f"目标细胞类型 {missing} 不存在于列 '{celltype_col}' 中")
+                mask = obs_series.isin(target_celltypes_list)
+                adata = adata[mask].copy()
+                obs_series = adata.obs[celltype_col].astype(str)
+
+            group_counts = obs_series.value_counts()
+            valid_groups = group_counts[group_counts >= max(min_cells, 1)].index
+            if len(valid_groups) == 0:
+                raise ValueError("筛选后没有满足 min_cells 条件的细胞类型")
+
+            mask = obs_series.isin(valid_groups)
+            adata = adata[mask].copy()
+            obs_series = adata.obs[celltype_col].astype(str)
+
+            expr_df = adata.to_df()  # cells × genes
+
+            if aggregation not in {"mean", "median"}:
+                raise ValueError("aggregation 仅支持 'mean' 或 'median'")
+
+            if aggregation == "mean":
+                aggregated = expr_df.groupby(obs_series).mean()
+            else:
+                aggregated = expr_df.groupby(obs_series).median()
+
+            df = aggregated.T  # genes × celltypes
+        else:
+            df = adata.to_df().T  # genes × cells
     else:
         raise ValueError(f"不支持的文件格式: {file_path}")
-    
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("表达矩阵为空或格式不正确")
+
+    # 如果行数少于列数, 可能是 cells × genes, 自动转置
     if df.shape[0] < df.shape[1]:
-            # 通常细胞数远大于基因数，如果行数少于列数，可能是 cells × genes
         df = df.T
 
-    return df
+    df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=0, how='all').dropna(axis=1, how='all')
+
+    # 表达矩阵：load_expression() 末尾
+    df.index = df.index.map(_norm_symbol)
+    df = df[~df.index.duplicated(keep="first")]
+
+    return df.astype(float)
     
 class AnalysisResult:
     def __init__(

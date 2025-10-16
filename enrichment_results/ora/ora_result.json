@@ -1,0 +1,141 @@
+{
+  "method": "ORA",
+  "database": "KEGG_2021_Human",
+  "celltype_col": null,
+  "target_celltype": null,
+  "organism": "Human",
+  "top_n": 20,
+  "n_terms": 20,
+  "n_significant": 20,
+  "pvalues": {
+    "Hematopoietic cell lineage": 5.259143607061087e-15,
+    "Graft-versus-host disease": 9.136697105277725e-13,
+    "Antigen processing and presentation": 1.2125747616066048e-12,
+    "Phagosome": 1.4232849493603353e-12,
+    "Allograft rejection": 5.876498906956401e-12,
+    "Leishmaniasis": 1.4630429450032266e-11,
+    "Type I diabetes mellitus": 1.630066002860521e-11,
+    "Viral myocarditis": 1.630066002860521e-11,
+    "Asthma": 2.052054465648226e-11,
+    "Rheumatoid arthritis": 8.983283239064112e-11,
+    "Autoimmune thyroid disease": 1.0012416122508263e-10,
+    "Intestinal immune network for IgA production": 1.1491499669202051e-09,
+    "Cell adhesion molecules": 1.2380429377810711e-09,
+    "Th17 cell differentiation": 6.236524169110167e-09,
+    "Influenza A": 7.016508802062909e-09,
+    "Inflammatory bowel disease": 1.4744558254667633e-08,
+    "Th1 and Th2 cell differentiation": 1.8680030090607937e-08,
+    "Staphylococcus aureus infection": 2.425492148769993e-08,
+    "Epstein-Barr virus infection": 3.9669010486784725e-08,
+    "Apoptosis": 8.978984935136436e-08
+  },
+  "top_terms": [
+    {
+      "Term": "Hematopoietic cell lineage",
+      "adjP": 5.259143607061087e-15,
+      "Overlapping Genes": 16
+    },
+    {
+      "Term": "Graft-versus-host disease",
+      "adjP": 9.136697105277725e-13,
+      "Overlapping Genes": 11
+    },
+    {
+      "Term": "Antigen processing and presentation",
+      "adjP": 1.2125747616066048e-12,
+      "Overlapping Genes": 13
+    },
+    {
+      "Term": "Phagosome",
+      "adjP": 1.4232849493603353e-12,
+      "Overlapping Genes": 16
+    },
+    {
+      "Term": "Allograft rejection",
+      "adjP": 5.876498906956401e-12,
+      "Overlapping Genes": 10
+    },
+    {
+      "Term": "Leishmaniasis",
+      "adjP": 1.4630429450032266e-11,
+      "Overlapping Genes": 12
+    },
+    {
+      "Term": "Type I diabetes mellitus",
+      "adjP": 1.630066002860521e-11,
+      "Overlapping Genes": 10
+    },
+    {
+      "Term": "Viral myocarditis",
+      "adjP": 1.630066002860521e-11,
+      "Overlapping Genes": 11
+    },
+    {
+      "Term": "Asthma",
+      "adjP": 2.052054465648226e-11,
+      "Overlapping Genes": 9
+    },
+    {
+      "Term": "Rheumatoid arthritis",
+      "adjP": 8.983283239064112e-11,
+      "Overlapping Genes": 12
+    },
+    {
+      "Term": "Autoimmune thyroid disease",
+      "adjP": 1.0012416122508263e-10,
+      "Overlapping Genes": 10
+    },
+    {
+      "Term": "Intestinal immune network for IgA production",
+      "adjP": 1.1491499669202051e-09,
+      "Overlapping Genes": 9
+    },
+    {
+      "Term": "Cell adhesion molecules",
+      "adjP": 1.2380429377810711e-09,
+      "Overlapping Genes": 13
+    },
+    {
+      "Term": "Th17 cell differentiation",
+      "adjP": 6.236524169110167e-09,
+      "Overlapping Genes": 11
+    },
+    {
+      "Term": "Influenza A",
+      "adjP": 7.016508802062909e-09,
+      "Overlapping Genes": 13
+    },
+    {
+      "Term": "Inflammatory bowel disease",
+      "adjP": 1.4744558254667633e-08,
+      "Overlapping Genes": 9
+    },
+    {
+      "Term": "Th1 and Th2 cell differentiation",
+      "adjP": 1.8680030090607937e-08,
+      "Overlapping Genes": 10
+    },
+    {
+      "Term": "Staphylococcus aureus infection",
+      "adjP": 2.425492148769993e-08,
+      "Overlapping Genes": 10
+    },
+    {
+      "Term": "Epstein-Barr virus infection",
+      "adjP": 3.9669010486784725e-08,
+      "Overlapping Genes": 13
+    },
+    {
+      "Term": "Apoptosis",
+      "adjP": 8.978984935136436e-08,
+      "Overlapping Genes": 11
+    }
+  ],
+  "meta": {
+    "gene_set": "KEGG_2021_Human",
+    "celltype_col": "pred_celltype",
+    "target_celltype": "CD8-positive, alpha-beta cytotoxic T cell",
+    "top_n": 150,
+    "organism": "Human"
+  }
+}
