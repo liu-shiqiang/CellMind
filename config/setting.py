@@ -18,6 +18,10 @@ class Settings:
     NEO4J_USERNAME = "neo4j"
     NEO4J_PASSWORD = "eWRgS3xons7xBhxaoZM0fr1SJZeANZoS6d_334ykH1k"
     NEO4J_DATABASE = "neo4j"
+    LLM_MODEL = "qwen3:30b"
+    LLM_BASE_URL = "http://localhost:11434"
+    LLM_TEMPERATURE = 0.6
+
 
 
 settings = Settings() 

@@ -6,10 +6,12 @@ from src.tools.clustering_marker import cluster_and_rank_markers
 from src.tools.annotate_with_markers import annotate_with_markers
 from src.tools.cluster_diff import cluster_and_diff
 from src.tools.annotate_with_cellrag import annotate_with_cellrag
+from src.tools.interpret_cluster_results import interpret_cluster_results
 
 TOOLS = [
     load_h5ad_data,
     extract_embeddings_with_scgpt,
     cluster_and_diff,
     annotate_with_markers,
+    interpret_cluster_results,
 ]
