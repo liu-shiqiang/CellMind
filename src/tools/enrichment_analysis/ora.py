@@ -33,15 +33,18 @@ class ORAAnalyzer(EnrichmentAnalysiszer):
         self,
         input_file: str,
         *,
-        celltype_col: str = "pred_celltype",       # 可选：你也可以传别的列
-        target_celltype: Optional[str] = None,     # 可选：不传则自动用该列里数量最多的类型
-        gene_set: str = "kegg",                    # "kegg" 或 "go"
-        top_n: Optional[int] = None,               # 不传则按 gene_set 取默认
-        enrichr_lib_path: Optional[str] = None,    # 可选：本地GMT，离线环境时使用
-        quiet: bool = True,                        # 默认不打log
+        celltype_col: str = "pred_celltype",
+        target_celltype: Optional[str] = None,
+        gene_set: str = "kegg",
+        top_n: Optional[int] = None,
+        enrichr_lib_path: Optional[str] = None,
+        # 新增：直接传入基因列表或基因文件（任一即可）
+        gene_list: Optional[list] = None,
+        gene_list_file: Optional[str] = None,
+        list_label: Optional[str] = None,   # 例如 "early" / "late"，用于 meta 标注
+        quiet: bool = True,
         logger: Optional[Callable[[str], None]] = None,
     ) -> AnalysisResult:
-
         gs = gene_set.lower()
         if gs not in _LIB:
             raise ValueError("gene_set 仅支持 'kegg' 或 'go'")
@@ -49,59 +52,76 @@ class ORAAnalyzer(EnrichmentAnalysiszer):
         if top_n is None:
             top_n = _DEF_TOPN[gs]
 
-        # 自动选择目标 celltype（数量最多）
-        if target_celltype is None:
-            adata = ad.read_h5ad(input_file)
-            if celltype_col not in adata.obs.columns:
-                raise ValueError(f"adata.obs 缺少列 '{celltype_col}'")
-            ser = adata.obs[celltype_col]
-            counts = (ser.value_counts().astype(int) if not hasattr(ser, "cat")
-                      else ser.value_counts().reindex(ser.cat.categories, fill_value=0).astype(int))
-            target_celltype = counts.idxmax()
+        # ---- 1) 解析 gene_list 优先级：gene_list > gene_list_file > 自动提取 ----
+        markers: list[str]
+        if gene_list is not None:
+            markers = [str(g).strip() for g in gene_list if str(g).strip()]
+        elif gene_list_file is not None:
+            with open(gene_list_file, "r") as fh:
+                markers = [ln.strip() for ln in fh if ln.strip()]
+        else:
+            # 沿用你原有的“按 celltype 提 marker”的逻辑
+            if target_celltype is None:
+                adata = ad.read_h5ad(input_file)
+                if celltype_col not in adata.obs.columns:
+                    raise ValueError(f"adata.obs 缺少列 '{celltype_col}'")
+                ser = adata.obs[celltype_col]
+                counts = (ser.value_counts().astype(int) if not hasattr(ser, "cat")
+                          else ser.value_counts().reindex(ser.cat.categories, fill_value=0).astype(int))
+                target_celltype = counts.idxmax()
 
-        # 提取 marker 基因
-        markers = extract_gene_list_from_celltype(
-            input_file,
-            celltype_col=celltype_col,
-            target_celltype=target_celltype,
-            top_n=top_n,
-            return_info=False,
-        )
+            markers = extract_gene_list_from_celltype(
+                input_file,
+                celltype_col=celltype_col,
+                target_celltype=target_celltype,
+                top_n=top_n,
+                return_info=False,
+            )
 
+        if not markers:
+            return AnalysisResult(pd.DataFrame(), {}, meta={"gene_set": lib_name})
+
+        # ---- 2) ORA ----
         gene_sets = enrichr_lib_path if enrichr_lib_path else lib_name
-
         enr = gp.enrichr(
             gene_list=markers,
             gene_sets=gene_sets,
             organism="Human",
             outdir=None,
             no_plot=True,
-            cutoff=1.0,     
+            cutoff=1.0,
             verbose=0
         )
-
         if enr is None or not hasattr(enr, "res2d") or enr.res2d is None or enr.res2d.empty:
-            return AnalysisResult(pd.DataFrame(), {})
+            return AnalysisResult(pd.DataFrame(), {}, meta={"gene_set": lib_name})
 
         df = enr.res2d.copy()
-        # 统一列名：用 adjP
+        # 统一 adjP
         if "Adjusted P-value" in df.columns:
             df = df.rename(columns={"Adjusted P-value": "adjP"})
         elif "P-value" in df.columns and "adjP" not in df.columns:
             df["adjP"] = df["P-value"]
-       
-        # 排序取前 20  
+
         df = df.sort_values("adjP", ascending=True)
         top_terms = df.head(20).copy()
         pvalues = dict(zip(top_terms["Term"], top_terms["adjP"]))
-        
-        return AnalysisResult(top_terms=top_terms,
-                              pvalues=pvalues,
-                              meta={"gene_set": lib_name,
-                                    "celltype_col": celltype_col,
-                                    "target_celltype": target_celltype,
-                                    "top_n": top_n,
-                                    "organism": "Human",})
+
+        # ---- 3) meta 补充：记录这是来自哪个 list（early/late） ----
+        meta = {
+            "gene_set": lib_name,
+            "organism": "Human",
+            "top_n": top_n,
+            "source": ("gene_list" if gene_list is not None else
+                       "gene_list_file" if gene_list_file is not None else
+                       "markers_from_celltype"),
+            "list_label": list_label,               # e.g., "early" / "late"
+            "gene_list_file": gene_list_file,
+            "celltype_col": celltype_col if gene_list is None and gene_list_file is None else None,
+            "target_celltype": target_celltype if gene_list is None and gene_list_file is None else None,
+            "n_input_genes": len(markers),
+        }
+
+        return AnalysisResult(top_terms=top_terms, pvalues=pvalues, meta=meta)
 
 
 class ORAVisualizer(EnrichmentVisualizer):
@@ -204,12 +224,20 @@ class ORAEvaluator(EnrichmentEvaluator):
         self,
         result: AnalysisResult,
         *,
+        outdir: Optional[str] = None,   # ← 新增：允许自定义输出目录
+        basename: Optional[str] = None, # ← 新增：文件名前缀（避免覆盖）
         top_k: int = 20,
         return_paths: bool = True,
     ):
-        outdir = _ensure_outdir()
+        # 目录
+        if outdir is None:
+            outdir = _ensure_outdir()
+        os.makedirs(outdir, exist_ok=True)
 
-              # 空结果：也写出最小文件，便于下游读取
+        # 文件名前缀
+        prefix = basename or "ora"
+
+        # ===== 空结果也写最小三件套 =====
         if result is None or result.top_terms is None or result.top_terms.empty:
             payload = {
                 "method": "ORA",
@@ -222,22 +250,24 @@ class ORAEvaluator(EnrichmentEvaluator):
                 "n_significant": 0,
                 "pvalues": {},
                 "top_terms": [],
+                "meta": getattr(result, "meta", {}) or {},
             }
-            json_path = os.path.join(outdir, "ora_result.json")
+            json_path = os.path.join(outdir, f"{prefix}_result.json")
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
 
-            summary_path = os.path.join(outdir, "ora_summary.txt")
+            summary_path = os.path.join(outdir, f"{prefix}_summary.txt")
             with open(summary_path, "w", encoding="utf-8") as f:
                 f.write("[ORA Summary] " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
                 f.write("No enriched terms.\n")
 
-            tsv_path = os.path.join(outdir, "ora_top_terms.tsv")
+            tsv_path = os.path.join(outdir, f"{prefix}_top_terms.tsv")
             pd.DataFrame().to_csv(tsv_path, sep="\t", index=False)
 
             msg = "No enriched terms."
             return (msg, {"json": json_path, "summary": summary_path, "tsv": tsv_path}) if return_paths else msg
 
+        # ===== 非空结果：与你原逻辑一致，只是文件名用 prefix =====
         df = result.top_terms.copy()
         if "adjP" not in df.columns:
             if "Adjusted P-value" in df.columns:
@@ -245,7 +275,6 @@ class ORAEvaluator(EnrichmentEvaluator):
             elif "P-value" in df.columns:
                 df["adjP"] = df["P-value"]
 
-        # 保存 TSV（前 top_k）
         save_df = df.sort_values("adjP", ascending=True).head(top_k)
 
         def _count_overlap(val):
@@ -260,7 +289,6 @@ class ORAEvaluator(EnrichmentEvaluator):
             return 0
 
         if "Overlap" in save_df.columns:
-            # enrichr 输出风格（比如 "12/243"）
             save_df["Overlapping Genes"] = save_df["Overlap"].astype(str).apply(
                 lambda s: int(s.split("/")[0]) if "/" in s else _count_overlap(s)
             )
@@ -269,11 +297,9 @@ class ORAEvaluator(EnrichmentEvaluator):
         else:
             save_df["Overlapping Genes"] = np.nan
 
-        tsv_path = os.path.join(outdir, "ora_top_terms.tsv")
+        tsv_path = os.path.join(outdir, f"{prefix}_top_terms.tsv")
         save_df.to_csv(tsv_path, sep="\t", index=False)
 
-
-        # 写 JSON（统一、轻量）
         pvals = {str(r["Term"]): _safe_float(r["adjP"]) for _, r in save_df.iterrows()}
         payload = {
             "method": "ORA",
@@ -296,11 +322,10 @@ class ORAEvaluator(EnrichmentEvaluator):
             "meta": (getattr(result, "meta", {}) or {})
         }
 
-        json_path = os.path.join(outdir, "ora_result.json")
+        json_path = os.path.join(outdir, f"{prefix}_result.json")
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
-        # 写 Summary
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [
             f"[ORA Summary] {ts}",
@@ -314,13 +339,13 @@ class ORAEvaluator(EnrichmentEvaluator):
             gc = int(r["Overlapping Genes"]) if not pd.isna(r["Overlapping Genes"]) else "-"
             lines.append(f"  - {r['Term']} (adjP={_safe_float(r['adjP'])}, n_genes={gc})")
 
-
-        summary_path = os.path.join(outdir, "ora_summary.txt")
+        summary_path = os.path.join(outdir, f"{prefix}_summary.txt")
         with open(summary_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
         msg = f"{payload['n_significant']} enriched terms (adjP<0.05)."
         return (msg, {"json": json_path, "summary": summary_path, "tsv": tsv_path}) if return_paths else msg
+
 
 class ORAFactory(EnrichmentFactory):
     def create_analyzer(self): return ORAAnalyzer()
