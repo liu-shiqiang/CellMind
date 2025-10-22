@@ -1,6 +1,7 @@
 from src.scripts.llm_loader import llm
 from langchain_core.tools import BaseTool
 from src.tools.load_h5ad import load_h5ad_data
+from src.tools.cellphoneDB import run_cellphoneDB_analysis
 
 # 导入你要测试的工具
 
@@ -8,6 +9,7 @@ from src.tools.load_h5ad import load_h5ad_data
 TOOLS = [
     # 加入你要测试的工具
     load_h5ad_data,
+    run_cellphoneDB_analysis,
 ]
 
 # 一个最简单的agent 调用工具， 用来测试工具可用性, 代码实现参考langgraph 文档可以，是工具调用的原理
@@ -53,7 +55,7 @@ def test_tool(prompt: str):
 if __name__ == "__main__":
     
     #设计你的prompt，prompt中应该包含工具调用需要的参数
-    prompt = "导入该数据并进行预处理:/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cell_type/CIMA_source_data/output/test_l3_stratified_5pct.h5ad"
+    prompt = "对该数据进行细胞通讯分析:/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cell_type/CIMA_source_data/output/test_l3_stratified_5pct.h5ad, work_dir:/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/cellphonedb"
     result = test_tool(prompt)
     print("Final Result:", result)
 
