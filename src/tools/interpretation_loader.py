@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -137,10 +138,236 @@ class EnrichmentProvider(ResultProvider):
             summary.enrichment_terms.append(enrichment)
 
 
+def _ora_companion(base: Path, suffix: str, extension: str) -> Optional[str]:
+    stem = base.stem.replace("_result", suffix)
+    candidate = base.with_name(stem + extension)
+    return str(candidate) if candidate.exists() else None
+
+
+class ORAEnrichmentProvider(ResultProvider):
+    def __init__(self) -> None:
+        super().__init__(name="ora_enrichment")
+
+    def load(
+        self,
+        work_dir: Path,
+        sample_name: str,
+        summaries: Dict[str, ClusterSummary],
+    ) -> None:
+        ora_dir = work_dir / "enrichment" / "ora"
+        if not ora_dir.exists():
+            return
+
+        json_files = sorted(ora_dir.glob("*_result.json"))
+        if not json_files:
+            return
+
+        global_payloads: List[Dict[str, Any]] = []
+
+        for json_path in json_files:
+            try:
+                with json_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception as exc:
+                logger.warning("Failed to parse ORA result %s: %s", json_path, exc)
+                continue
+
+            meta = payload.get("meta") or {}
+            cluster_id = str(meta.get("cluster_id")) if meta.get("cluster_id") is not None else None
+            list_label = meta.get("list_label") or None
+            top_terms = payload.get("top_terms") or []
+
+            summary_path = _ora_companion(json_path, "_summary", ".txt")
+            tsv_path = _ora_companion(json_path, "_top_terms", ".tsv")
+
+            entry = {
+                "meta": meta,
+                "paths": {
+                    "json": str(json_path),
+                    **({"summary": summary_path} if summary_path else {}),
+                    **({"tsv": tsv_path} if tsv_path else {}),
+                },
+                "top_terms": top_terms,
+            }
+
+            enrichment_terms = []
+            for item in top_terms:
+                term_name = item.get("Term") or item.get("term") or item.get("name")
+                if not term_name:
+                    continue
+                adjp = _safe_float(item.get("adjP") or item.get("p_value") or item.get("pvalue"))
+                enrichment_terms.append(
+                    EnrichmentTerm(
+                        term=str(term_name),
+                        score=None,
+                        p_value=adjp,
+                        metadata={
+                            "overlap": item.get("Overlapping Genes") or item.get("overlap"),
+                            "label": list_label,
+                            "source_path": str(json_path),
+                            "method": payload.get("method"),
+                            "database": payload.get("database"),
+                        },
+                    )
+                )
+
+            if cluster_id and cluster_id in summaries:
+                summary = summaries[cluster_id]
+            elif cluster_id:
+                summary = summaries.setdefault(cluster_id, ClusterSummary(cluster_id=cluster_id))
+            else:
+                summary = None
+
+            if summary:
+                summary.metadata.setdefault("ora_results", []).append(entry)
+                summary.enrichment_terms.extend(enrichment_terms)
+            else:
+                global_payloads.append(entry)
+
+        if global_payloads:
+            for summary in summaries.values():
+                global_info = summary.metadata.setdefault("global_enrichment", {})
+                existing = global_info.setdefault("ora", [])
+                existing.extend(deepcopy(global_payloads))
+
+
+class SSGSEAResultProvider(ResultProvider):
+    def __init__(self) -> None:
+        super().__init__(name="ssgsea_enrichment")
+
+    def load(
+        self,
+        work_dir: Path,
+        sample_name: str,
+        summaries: Dict[str, ClusterSummary],
+    ) -> None:
+        enrich_dir = work_dir / "enrichment" / "ssgsea"
+        if not enrich_dir.exists():
+            return
+
+        json_path = enrich_dir / "ssgsea_result.json"
+        if not json_path.exists():
+            return
+
+        try:
+            with json_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:
+            logger.warning("Failed to parse ssGSEA result %s: %s", json_path, exc)
+            return
+
+        summary_path = enrich_dir / "ssgsea_summary.txt"
+        tsv_path = enrich_dir / "ssgsea_top_terms.tsv"
+        scores_path = enrich_dir / "ssgsea_scores.tsv"
+
+        entry = {
+            "payload": payload,
+            "paths": {
+                "json": str(json_path),
+                **({"summary": str(summary_path)} if summary_path.exists() else {}),
+                **({"tsv": str(tsv_path)} if tsv_path.exists() else {}),
+                **({"scores": str(scores_path)} if scores_path.exists() else {}),
+            },
+        }
+
+        for summary in summaries.values():
+            global_info = summary.metadata.setdefault("global_enrichment", {})
+            global_info["ssgsea"] = deepcopy(entry)
+
+
+class CellphoneDBProvider(ResultProvider):
+    def __init__(self) -> None:
+        super().__init__(name="cellphone_db")
+
+    def load(
+        self,
+        work_dir: Path,
+        sample_name: str,
+        summaries: Dict[str, ClusterSummary],
+    ) -> None:
+        base_dir = work_dir / "cellphonedb_results"
+        if not base_dir.exists():
+            return
+
+        summary_path = base_dir / "summary.txt"
+        top_path = base_dir / "top_interactions.tsv"
+        chord_path = base_dir / "cpdb_chord.png"
+        heatmap_path = base_dir / "cpdb_heatmap.png"
+
+        summary_text = summary_path.read_text(encoding="utf-8") if summary_path.exists() else None
+        interactions: List[Dict[str, Any]]
+        if top_path.exists():
+            try:
+                df = pd.read_csv(top_path, sep="\t")
+                interactions = df.to_dict(orient="records")
+            except Exception as exc:
+                logger.warning("Failed to read CellPhoneDB interactions %s: %s", top_path, exc)
+                interactions = []
+        else:
+            interactions = []
+
+        entry = {
+            "summary_path": str(summary_path) if summary_path.exists() else None,
+            "summary_text": summary_text,
+            "top_interactions": interactions,
+            "figures": {
+                "chord": str(chord_path) if chord_path.exists() else None,
+                "heatmap": str(heatmap_path) if heatmap_path.exists() else None,
+            },
+        }
+
+        for summary in summaries.values():
+            summary.metadata.setdefault("cell_communication", deepcopy(entry))
+
+
+class PseudotimeResultProvider(ResultProvider):
+    def __init__(self) -> None:
+        super().__init__(name="pseudotime")
+
+    def load(
+        self,
+        work_dir: Path,
+        sample_name: str,
+        summaries: Dict[str, ClusterSummary],
+    ) -> None:
+        pt_dir = work_dir / "pseudotime"
+        if not pt_dir.exists():
+            return
+
+        master_path = pt_dir / "pseudotime_master.json"
+        payload: Dict[str, Any]
+        if master_path.exists():
+            try:
+                with master_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception as exc:
+                logger.warning("Failed to parse pseudotime master JSON %s: %s", master_path, exc)
+                payload = {}
+        else:
+            payload = {}
+
+        analysis_info: Dict[str, Any] = {
+            "master_json": str(master_path) if master_path.exists() else None,
+            "summary_txt": str(pt_dir / "pseudotime_summary.txt") if (pt_dir / "pseudotime_summary.txt").exists() else None,
+            "result_json": str(pt_dir / "pseudotime_result.json") if (pt_dir / "pseudotime_result.json").exists() else None,
+            "meta": (payload.get("pseudotime", {}) or {}).get("meta", {}),
+            "celltype_summary": (payload.get("pseudotime", {}) or {}).get("celltype_summary", []),
+            "ora": (payload.get("enrichment", {}) or {}).get("ORA", {}),
+            "artifacts": (payload.get("artifacts") or {}),
+        }
+
+        for summary in summaries.values():
+            summary.metadata.setdefault("pseudotime", deepcopy(analysis_info))
+
+
 PROVIDERS: List[ResultProvider] = [
     DiffGeneProvider(),
     MarkerProvider(),
     EnrichmentProvider(),
+    ORAEnrichmentProvider(),
+    SSGSEAResultProvider(),
+    CellphoneDBProvider(),
+    PseudotimeResultProvider(),
 ]
 
 

@@ -6,7 +6,11 @@ import os
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Dict, Optional
+
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 import numpy as np
 import pandas as pd
@@ -18,10 +22,13 @@ _OUTDIR_ROOT = "analysis_results"
 _SUBDIR = "pseudotime"
 
 
-def _ensure_outdir() -> str:
-    outdir = os.path.join(_OUTDIR_ROOT, _SUBDIR)
-    os.makedirs(outdir, exist_ok=True)
-    return outdir
+def _ensure_outdir(path: Optional[str] = None) -> str:
+    if path:
+        outdir = Path(path).expanduser().resolve()
+    else:
+        outdir = Path(_OUTDIR_ROOT) / _SUBDIR
+    outdir.mkdir(parents=True, exist_ok=True)
+    return str(outdir)
 
 
 def _log(logger: Optional[Callable[[str], None]], msg: str) -> None:
@@ -68,6 +75,7 @@ class PseudotimeAnalyzer:
         n_pcs: int = 30,
         max_top_genes: int = 2000,
         logger: Optional[Callable[[str], None]] = None,
+        output_dir: Optional[str] = None,
     ) -> PseudotimeResult:
 
         _log(logger, f"[pseudotime] loading {file_path}")
@@ -178,7 +186,7 @@ class PseudotimeAnalyzer:
         labels = np.where(pt <= med, "early", "late")
         bin_table = pt_table.copy()
         bin_table["pt_bin"] = labels
-        outdir = _ensure_outdir()
+        outdir = _ensure_outdir(output_dir)
         bin_table.to_csv(os.path.join(outdir, "pseudotime_bins.tsv"), sep="\t", index=False)
         meta["pt_cut"] = {"scheme": "early/late@median", "median": med}
         meta["bin_counts"] = {
@@ -366,10 +374,11 @@ class PseudotimeVisualizer:
         with_celltype_box: bool = True,
         celltype_col: str = "pred_celltype",
         cmap: str = "viridis",
+        output_dir: Optional[str] = None,
     ) -> Dict[str, Optional[str]]:
         import matplotlib.pyplot as plt
         import numpy as np
-        outdir = _ensure_outdir()
+        outdir = _ensure_outdir(output_dir)
         paths: Dict[str, Optional[str]] = {"embedding": None, "hist": None, "celltype_box": None}
 
         # 1) embedding colored by pseudotime
@@ -596,6 +605,123 @@ class PseudotimeFactory:
     def create_analyzer(self) -> PseudotimeAnalyzer: return PseudotimeAnalyzer()
     def create_visualizer(self) -> PseudotimeVisualizer: return PseudotimeVisualizer()
     def create_evaluator(self) -> PseudotimeEvaluator: return PseudotimeEvaluator()
+
+
+class PseudotimeAnalysisArgs(BaseModel):
+    file_path: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
+    work_dir: str = Field(..., description="Work directory where pseudotime outputs will be written.")
+    celltype_col: str = Field(default="pred_celltype", description="Column in AnnData.obs containing cell type annotations.")
+    root_cell: Optional[str] = Field(default=None, description="Cell identifier to use as the pseudotime root.")
+    root_celltype: Optional[str] = Field(default=None, description="Cell type label used to select the pseudotime root cell.")
+    n_neighbors: int = Field(default=30, ge=5, description="Number of neighbours for the k-NN graph.")
+    n_pcs: int = Field(default=30, ge=5, description="Number of principal components to retain.")
+    max_top_genes: int = Field(default=2000, description="Maximum number of highly variable genes to select.")
+    top_k_celltypes: int = Field(default=5, description="Number of early/late cell types highlighted in the summary.")
+    with_celltype_box: bool = Field(default=True, description="Whether to generate per-celltype pseudotime boxplots.")
+    cmap: str = Field(default="viridis", description="Matplotlib colormap used for embedding visualisation.")
+    include_ora: bool = Field(default=True, description="Include ORA summaries when writing the evaluation text.")
+
+
+@tool("run_pseudotime_analysis", args_schema=PseudotimeAnalysisArgs)
+def run_pseudotime_analysis(
+    file_path: str,
+    work_dir: str,
+    celltype_col: str = "pred_celltype",
+    root_cell: Optional[str] = None,
+    root_celltype: Optional[str] = None,
+    n_neighbors: int = 30,
+    n_pcs: int = 30,
+    max_top_genes: int = 2000,
+    top_k_celltypes: int = 5,
+    with_celltype_box: bool = True,
+    cmap: str = "viridis",
+    include_ora: bool = True,
+) -> str:
+    """Run diffusion pseudotime analysis and generate summary outputs."""
+
+    input_path = Path(file_path).expanduser().resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    work_path = Path(work_dir).expanduser().resolve()
+    work_path.mkdir(parents=True, exist_ok=True)
+    outdir = work_path / "pseudotime"
+
+    analyzer = PseudotimeAnalyzer()
+    result = analyzer.run(
+        file_path=str(input_path),
+        celltype_col=celltype_col,
+        root_cell=root_cell,
+        root_celltype=root_celltype,
+        n_neighbors=n_neighbors,
+        n_pcs=n_pcs,
+        max_top_genes=max_top_genes,
+        logger=None,
+        output_dir=str(outdir),
+    )
+
+    meta = dict(result.meta or {})
+    meta.setdefault("work_dir", str(work_path))
+    meta["output_dir"] = str(outdir.resolve())
+    result.meta = meta
+
+    visualizer = PseudotimeVisualizer()
+    plot_paths = visualizer.plot(
+        result,
+        with_celltype_box=with_celltype_box,
+        celltype_col=celltype_col,
+        cmap=cmap,
+        output_dir=str(outdir),
+    )
+
+    evaluator = PseudotimeEvaluator()
+    summary_text = evaluator.evaluate(
+        result,
+        top_k=top_k_celltypes,
+        outdir=str(outdir),
+        celltype_col=celltype_col,
+        include_ora=include_ora,
+        save_text=True,
+    )
+
+    def _path_if_exists(path: Path) -> Optional[str]:
+        return str(path.resolve()) if path.exists() else None
+
+    master_json = _path_if_exists(outdir / "pseudotime_master.json")
+    master_txt = _path_if_exists(outdir / "pseudotime_master.txt")
+    result_json = _path_if_exists(outdir / "pseudotime_result.json")
+    summary_path = _path_if_exists(outdir / "pseudotime_summary.txt")
+
+    artifacts = {
+        "plots": {k: (str(Path(v).resolve()) if v else None) for k, v in (plot_paths or {}).items()},
+        "tables": {
+            "pseudotime_bins": _path_if_exists(outdir / "pseudotime_bins.tsv"),
+            "early_markers": _path_if_exists(outdir / "early_markers.txt"),
+            "late_markers": _path_if_exists(outdir / "late_markers.txt"),
+        },
+        "summaries": {
+            "master_json": master_json,
+            "master_text": master_txt,
+            "result_json": result_json,
+            "summary_txt": summary_path,
+        },
+    }
+
+    celltype_records = (
+        result.celltype_summary.to_dict(orient="records")
+        if result.celltype_summary is not None and not result.celltype_summary.empty
+        else []
+    )
+
+    payload = {
+        "status": "success",
+        "summary": summary_text,
+        "meta": result.meta,
+        "artifacts": artifacts,
+        "celltype_summary": celltype_records,
+    }
+
+    return json.dumps(payload, ensure_ascii=False)
 
 
 if __name__ == "__main__":
