@@ -67,6 +67,10 @@ def cluster_and_diff(
         use_raw=False,
     )
 
+    sc.pl.rank_genes_groups_dotplot(
+        adata, groupby="scGPT_clusters", standard_scale="var", n_genes=5,save = "_dotplot_scgpt_clustered.png", show=False
+    )
+
     # Compute gene difference 
     diff_genes_df = sc.get.rank_genes_groups_df(adata, group=None)
     result_df = pd.DataFrame({
