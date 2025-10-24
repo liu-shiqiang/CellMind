@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 
 from config.setting import settings
 from src.memory.conversation_memory import ConversationMemoryStore
+from src.scripts.dataset_interpretation import (
+    DatasetReportArtifacts,
+    generate_dataset_report,
+)
 from src.scripts.interpretation_generator import generate_cluster_interpretation
 from src.scripts.interpretation_types import ClusterSummary, InterpretationOutput
 from src.scripts.rag import BioKnowledgeRag, CellRag, find_similar_clusters
@@ -134,6 +138,22 @@ def interpret_cluster_results(
         )
         interpretations.append(interpretation)
 
+    try:
+        dataset_report: DatasetReportArtifacts = generate_dataset_report(
+            llm,
+            clusters,
+            interpretations,
+            output_dir=output_dir,
+            dataset_name=work_path.name,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to build dataset-level report: %s", exc)
+        dataset_report = DatasetReportArtifacts(
+            report_path=None,
+            context_json_path=None,
+            report_content="",
+        )
+
     result_payload = {
         "work_dir": str(work_path),
         "collection": collection,
@@ -145,7 +165,15 @@ def interpret_cluster_results(
                 "confidence": item.result.get("confidence"),
             }
             for item in interpretations
-        ], 
+        ],
+        "dataset_report": {
+            "report_path": str(dataset_report.report_path)
+            if dataset_report.report_path
+            else None,
+            "context_path": str(dataset_report.context_json_path)
+            if dataset_report.context_json_path
+            else None,
+        },
     }
 
     if persist_memory and memory_thread_id:
