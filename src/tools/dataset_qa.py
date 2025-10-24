@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from config.setting import settings
 from src.scripts.dataset_interpretation import (
+    build_celltype_context,
     build_dataset_context,
     load_interpretation_outputs_from_disk,
 )
@@ -132,6 +133,12 @@ def _prepare_dataset_context(
         interpretations,
         dataset_name=work_path.name,
     )
+    celltype_context = build_celltype_context(
+        clusters,
+        interpretations,
+        dataset_name=work_path.name,
+        dataset_context=context,
+    )
     clusters_sorted = sorted(
         context.get("clusters", []),
         key=lambda item: item.get("n_cells", 0),
@@ -139,6 +146,10 @@ def _prepare_dataset_context(
     )
     context_for_qa = dict(context)
     context_for_qa["clusters"] = clusters_sorted[: min(len(clusters_sorted), 8)]
+    context_for_qa["cell_types"] = celltype_context.get("cell_types", [])[: min(len(celltype_context.get("cell_types", [])), 10)]
+    context_for_qa["cell_type_statistics"] = celltype_context.get("statistics")
+    if "global_signals" not in context_for_qa and celltype_context.get("global_signals"):
+        context_for_qa["global_signals"] = celltype_context.get("global_signals")
     return context_for_qa
 
 
@@ -164,6 +175,9 @@ def dataset_bio_qa(
         dataset_report_path = interpretation_dir / "overall_interpretation_report.md"
     dataset_report_text = _read_text(dataset_report_path)
 
+    celltype_report_path = interpretation_dir / "celltype_interpretation_report.md"
+    celltype_report_text = _read_text(celltype_report_path)
+
     local_docs = _collect_local_rag(question, top_k=top_k_local)
     pubmed_docs = _collect_pubmed_rag(work_path, question, top_k=top_k_pubmed)
 
@@ -176,6 +190,8 @@ def dataset_bio_qa(
         context_sections.append("【本地知识库检索】\n" + _format_documents(local_docs, "Local"))
     if pubmed_docs:
         context_sections.append("【PubMed 检索摘要】\n" + _format_documents(pubmed_docs, "PubMed"))
+    if celltype_report_text:
+        context_sections.append("【细胞类型解读报告】\n" + celltype_report_text)
 
     combined_context = "\n\n".join(context_sections)
 
@@ -208,6 +224,7 @@ def dataset_bio_qa(
         "question": question,
         "answer": answer_text,
         "dataset_report": str(dataset_report_path) if dataset_report_path.exists() else None,
+        "celltype_report": str(celltype_report_path) if celltype_report_path.exists() else None,
         "local_hits": [doc.metadata for doc in local_docs],
         "pubmed_hits": [doc.metadata for doc in pubmed_docs],
     }
@@ -222,6 +239,7 @@ def dataset_bio_qa(
             "question": question,
             "answer": answer_text,
             "dataset_report_path": str(dataset_report_path) if dataset_report_path.exists() else None,
+            "celltype_report_path": str(celltype_report_path) if celltype_report_path.exists() else None,
             "qa_history_path": str(qa_history_path),
             "local_reference_count": len(local_docs),
             "pubmed_reference_count": len(pubmed_docs),

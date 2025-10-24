@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field
 from config.setting import settings
 from src.memory.conversation_memory import ConversationMemoryStore
 from src.scripts.dataset_interpretation import (
+    CellTypeReportArtifacts,
     DatasetReportArtifacts,
+    build_celltype_context,
+    build_dataset_context,
+    generate_celltype_report,
     generate_dataset_report,
 )
 from src.scripts.interpretation_generator import generate_cluster_interpretation
@@ -138,6 +142,19 @@ def interpret_cluster_results(
         )
         interpretations.append(interpretation)
 
+    dataset_context = build_dataset_context(
+        clusters,
+        interpretations,
+        dataset_name=work_path.name,
+    )
+
+    celltype_context = build_celltype_context(
+        clusters,
+        interpretations,
+        dataset_name=work_path.name,
+        dataset_context=dataset_context,
+    )
+
     try:
         dataset_report: DatasetReportArtifacts = generate_dataset_report(
             llm,
@@ -145,10 +162,29 @@ def interpret_cluster_results(
             interpretations,
             output_dir=output_dir,
             dataset_name=work_path.name,
+            dataset_context=dataset_context,
         )
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Failed to build dataset-level report: %s", exc)
         dataset_report = DatasetReportArtifacts(
+            report_path=None,
+            context_json_path=None,
+            report_content="",
+        )
+
+    try:
+        celltype_report: CellTypeReportArtifacts = generate_celltype_report(
+            llm,
+            clusters,
+            interpretations,
+            output_dir=output_dir,
+            dataset_name=work_path.name,
+            dataset_context=dataset_context,
+            celltype_context=celltype_context,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to build cell-type report: %s", exc)
+        celltype_report = CellTypeReportArtifacts(
             report_path=None,
             context_json_path=None,
             report_content="",
@@ -172,6 +208,14 @@ def interpret_cluster_results(
             else None,
             "context_path": str(dataset_report.context_json_path)
             if dataset_report.context_json_path
+            else None,
+        },
+        "celltype_report": {
+            "report_path": str(celltype_report.report_path)
+            if celltype_report.report_path
+            else None,
+            "context_path": str(celltype_report.context_json_path)
+            if celltype_report.context_json_path
             else None,
         },
     }
