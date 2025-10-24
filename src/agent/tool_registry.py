@@ -7,6 +7,10 @@ from src.tools.annotate_with_markers import annotate_with_markers
 from src.tools.cluster_diff import cluster_and_diff
 from src.tools.annotate_with_cellrag import annotate_with_cellrag
 from src.tools.interpret_cluster_results import interpret_cluster_results
+from src.tools.enrichment_analysis.ora import run_ora_enrichment
+from src.tools.enrichment_analysis.ssgsea import run_ssgsea_enrichment
+from src.tools.cellphoneDB import run_cellphonedb_core
+from src.tools.pseudotime_analysis import run_pseudotime_analysis
 
 TOOLS = [
     load_h5ad_data,
@@ -14,4 +18,7 @@ TOOLS = [
     cluster_and_diff,
     annotate_with_markers,
     interpret_cluster_results,
+    run_ssgsea_enrichment,
+    run_cellphonedb_core,
+    run_pseudotime_analysis,
 ]

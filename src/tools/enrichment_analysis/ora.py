@@ -1,4 +1,5 @@
-from typing import Optional, Callable, Dict
+from pathlib import Path
+from typing import Optional, Callable, Dict, List
 import os, json
 from datetime import datetime
 
@@ -6,6 +7,8 @@ import numpy as np
 import pandas as pd
 import anndata as ad
 import gseapy as gp
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 from .interface import EnrichmentAnalysiszer, EnrichmentVisualizer, EnrichmentEvaluator, EnrichmentFactory
 from .data_setting import extract_gene_list_from_celltype, AnalysisResult
@@ -351,6 +354,122 @@ class ORAFactory(EnrichmentFactory):
     def create_analyzer(self): return ORAAnalyzer()
     def create_visualizer(self): return ORAVisualizer()
     def create_evaluator(self): return ORAEvaluator()
+
+
+
+class ORAEnrichmentArgs(BaseModel):
+    input_file: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
+    work_dir: str = Field(..., description="Work directory where enrichment outputs will be stored.")
+    target_celltype: Optional[str] = Field(default=None, description="Specific cell type to extract marker genes for enrichment.")
+    gene_set: str = Field(default="kegg", description="Gene set library to use (e.g. 'kegg' or 'go').")
+    top_n: Optional[int] = Field(default=None, description="Number of top marker genes to include from the selected population.")
+    enrichr_lib_path: Optional[str] = Field(default=None, description="Optional path to a local Enrichr library file.")
+    gene_list: Optional[List[str]] = Field(default=None, description="Explicit list of genes to analyse. Overrides automatic extraction.")
+    gene_list_file: Optional[str] = Field(default=None, description="Text file containing genes (one per line). Overrides automatic extraction.")
+    list_label: Optional[str] = Field(default=None, description="Label describing the gene list (e.g. 'early' or 'late').")
+    cluster_id: Optional[str] = Field(default=None, description="Cluster identifier associated with this enrichment run.")
+
+
+@tool("run_ora_enrichment", args_schema=ORAEnrichmentArgs)
+def run_ora_enrichment(
+    input_file: str,
+    work_dir: str,
+    target_celltype: Optional[str] = None,
+    gene_set: str = "kegg",
+    top_n: Optional[int] = None,
+    enrichr_lib_path: Optional[str] = None,
+    gene_list: Optional[List[str]] = None,
+    gene_list_file: Optional[str] = None,
+    list_label: Optional[str] = None, 
+    cluster_id: Optional[str] = None,
+) -> str:
+    """Run ORA enrichment using marker genes derived from a cluster or a custom gene list."""
+
+    input_path = Path(input_file).expanduser().resolve()
+    if not input_path.exists() and not (gene_list or gene_list_file):
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    work_path = Path(work_dir).expanduser().resolve()
+    work_path.mkdir(parents=True, exist_ok=True)
+    outdir = work_path / "enrichment" / "ora"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    analyzer = ORAAnalyzer()
+    result = analyzer.run(
+        input_file=str(input_path),
+        celltype_col="pred_celltype",
+        target_celltype=target_celltype,
+        gene_set=gene_set,
+        top_n=top_n,
+        enrichr_lib_path=enrichr_lib_path,
+        gene_list=gene_list,
+        gene_list_file=gene_list_file,
+        list_label=list_label,
+    )
+
+    meta = dict(getattr(result, "meta", {}) or {})
+    meta.setdefault("gene_set", gene_set)
+    meta.setdefault("work_dir", str(work_path))
+    if cluster_id is not None:
+        meta["cluster_id"] = str(cluster_id)
+    result.meta = meta
+
+    sample_name = work_path.name or (input_path.stem if input_path.name else "sample")
+    prefix_parts = [sample_name]
+    if cluster_id:
+        prefix_parts.append(f"cluster{cluster_id}")
+    elif target_celltype:
+        prefix_parts.append(str(target_celltype).replace(" ", "_"))
+    if list_label:
+        prefix_parts.append(str(list_label))
+    basename = "_".join([part for part in prefix_parts if part]) or "ora"
+
+    visualizer = ORAVisualizer()
+    plot_path = visualizer.plot(
+        result,
+        outdir=str(outdir),
+        title_prefix=f"ORA · {gene_set.upper()}",
+        output_path=str(outdir / f"{basename}_plot.png"),
+    )
+
+    evaluator = ORAEvaluator()
+    eval_msg, eval_paths = evaluator.evaluate(
+        result,
+        outdir=str(outdir),
+        basename=basename,
+        return_paths=True,
+    )
+
+    paths_dict: Dict[str, str] = {}
+    for key, value in (eval_paths or {}).items():
+        if value:
+            paths_dict[key] = str(Path(value).expanduser().resolve())
+    if plot_path:
+        paths_dict["plot"] = str(Path(plot_path).expanduser().resolve())
+
+    top_terms_records: List[Dict[str, object]] = []
+    if result.top_terms is not None and not result.top_terms.empty:
+        for row in result.top_terms.head(20).to_dict(orient="records"):
+            cleaned = {}
+            for key, value in row.items():
+                if isinstance(value, (np.floating, np.float32, np.float64)):
+                    cleaned[key] = float(value)
+                elif isinstance(value, (np.integer, np.int64, np.int32)):
+                    cleaned[key] = int(value)
+                else:
+                    cleaned[key] = value
+            top_terms_records.append(cleaned)
+
+    payload = {
+        "status": "success",
+        "message": eval_msg,
+        "result_paths": paths_dict,
+        "top_terms": top_terms_records,
+        "pvalues": {str(k): float(v) for k, v in (result.pvalues or {}).items()},
+        "meta": result.meta,
+    }
+
+    return json.dumps(payload, ensure_ascii=False)
 
 
 

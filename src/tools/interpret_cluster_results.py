@@ -145,7 +145,7 @@ def interpret_cluster_results(
                 "confidence": item.result.get("confidence"),
             }
             for item in interpretations
-        ],
+        ], 
     }
 
     if persist_memory and memory_thread_id:

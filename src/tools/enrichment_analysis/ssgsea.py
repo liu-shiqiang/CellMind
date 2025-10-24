@@ -1,5 +1,6 @@
 # ssgsea.py — unified minimal outputs (auto: ranksum_boot if enough groups else zscore)
-from typing import Iterable, Optional, Dict, Any
+from pathlib import Path
+from typing import Iterable, Optional, Dict, Any, List
 import os, json
 from datetime import datetime
 
@@ -8,6 +9,8 @@ import pandas as pd
 import gseapy as gp
 from scipy.stats import norm, ranksums
 from statsmodels.stats.multitest import multipletests
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 from .interface import EnrichmentAnalysiszer, EnrichmentVisualizer, EnrichmentEvaluator, EnrichmentFactory
 from .data_setting import load_pathway_genesets, load_expression, AnalysisResult
@@ -15,10 +18,14 @@ from .data_setting import load_pathway_genesets, load_expression, AnalysisResult
 _OUTDIR_ROOT = "enrichment_results"
 _SUBDIR = "ssgsea"
 
-def _ensure_outdir() -> str:
-    outdir = os.path.join(_OUTDIR_ROOT, _SUBDIR)
-    os.makedirs(outdir, exist_ok=True)
-    return outdir
+
+def _ensure_outdir(path: Optional[str] = None) -> str:
+    if path:
+        outdir = Path(path).expanduser().resolve()
+    else:
+        outdir = Path(_OUTDIR_ROOT) / _SUBDIR
+    outdir.mkdir(parents=True, exist_ok=True)
+    return str(outdir)
 
 def _ensure_gene_set_axis(scores: pd.DataFrame, gene_set_names: Iterable[str]) -> pd.DataFrame:
     gene_set_names = set(map(str, gene_set_names))
@@ -187,7 +194,13 @@ class SSGSEAAnalyzer(EnrichmentAnalysiszer):
 
 
 class SSGSEAVisualizer(EnrichmentVisualizer):
-    def plot(self, results: AnalysisResult, *, top_n: int = 12):
+    def plot(
+        self,
+        results: AnalysisResult,
+        *,
+        top_n: int = 12,
+        outdir: Optional[str] = None,
+    ):
         import matplotlib.pyplot as plt
         import seaborn as sns
         import numpy as np
@@ -196,8 +209,7 @@ class SSGSEAVisualizer(EnrichmentVisualizer):
         if results.top_terms is None or results.top_terms.empty or results.scores is None:
             return None
 
-        outdir = os.path.join("enrichment_results", "ssgsea")
-        os.makedirs(outdir, exist_ok=True)
+        outdir = _ensure_outdir(outdir)
 
         top_pathways = results.top_terms["Pathway"].head(top_n).tolist()
         avail = [p for p in top_pathways if p in results.scores.index]
@@ -239,8 +251,16 @@ class SSGSEAVisualizer(EnrichmentVisualizer):
 
 
 class SSGSEAEvaluator(EnrichmentEvaluator):
-    def evaluate(self, results: AnalysisResult, *, top_k: int = 20, fdr_threshold: float = 0.05, return_paths: bool = True):
-        outdir = _ensure_outdir()
+    def evaluate(
+        self,
+        results: AnalysisResult,
+        *,
+        top_k: int = 20,
+        fdr_threshold: float = 0.05,
+        return_paths: bool = True,
+        outdir: Optional[str] = None,
+    ):
+        outdir = _ensure_outdir(outdir)
 
         # 空结果：也输出最小三件套
         if results is None or results.top_terms is None or results.top_terms.empty:
@@ -318,6 +338,122 @@ class SSGSEAFactory(EnrichmentFactory):
     def create_analyzer(self): return SSGSEAAnalyzer()
     def create_visualizer(self): return SSGSEAVisualizer()
     def create_evaluator(self): return SSGSEAEvaluator()
+
+
+class SSGSEAEnrichmentArgs(BaseModel):
+    file_path: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
+    work_dir: str = Field(..., description="Work directory where ssGSEA outputs will be stored.")
+    gene_set: str = Field(default="KEGG", description="Gene set library to use (e.g. KEGG, GO, Hallmark).")
+    celltype_col: str = Field(default="pred_celltype", description="Column in AnnData.obs that defines cell groups.")
+    target_celltypes: Optional[List[str]] = Field(default=None, description="Subset of cell types to include in the analysis.")
+    aggregation: str = Field(default="mean", description="Aggregation strategy when collapsing to cell types.")
+    min_cells: int = Field(default=15, description="Minimum cells required per cell type for aggregation.")
+    mode: str = Field(default="auto", description="Statistic used for ranking (auto, zscore, ranksum_boot).")
+    min_cells_per_group: int = Field(default=30, description="Minimum cells for a group to be considered in auto mode.")
+    min_groups_for_A: int = Field(default=4, description="Minimum groups required to trigger ranksum bootstrap in auto mode.")
+    threads: int = Field(default=1, description="Number of threads for gseapy.ssgsea.")
+    top_n_heatmap: int = Field(default=12, description="Number of pathways to display in the heatmap.")
+    top_k_terms: int = Field(default=20, description="Number of pathways saved to the TSV/JSON outputs.")
+    fdr_threshold: float = Field(default=0.05, description="FDR threshold used when counting significant pathways.")
+    cluster_id: Optional[str] = Field(default=None, description="Optional cluster identifier associated with this analysis.")
+
+
+@tool("run_ssgsea_enrichment", args_schema=SSGSEAEnrichmentArgs)
+def run_ssgsea_enrichment(
+    file_path: str,
+    work_dir: str,
+    gene_set: str = "KEGG",
+    celltype_col: str = "pred_celltype",
+    target_celltypes: Optional[List[str]] = None,
+    aggregation: str = "mean",
+    min_cells: int = 15,
+    mode: str = "auto",
+    min_cells_per_group: int = 30,
+    min_groups_for_A: int = 4,
+    threads: int = 1,
+    top_n_heatmap: int = 12,
+    top_k_terms: int = 20,
+    fdr_threshold: float = 0.05,
+    cluster_id: Optional[str] = None,
+) -> str:
+    """Run ssGSEA enrichment on aggregated cell type expression profiles."""
+
+    input_path = Path(file_path).expanduser().resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    work_path = Path(work_dir).expanduser().resolve()
+    work_path.mkdir(parents=True, exist_ok=True)
+    outdir = Path(_ensure_outdir(work_path / "enrichment" / "ssgsea"))
+
+    analyzer = SSGSEAAnalyzer()
+    result = analyzer.run(
+        file_path=str(input_path),
+        gene_set=gene_set,
+        celltype_col=celltype_col,
+        target_celltypes=target_celltypes,
+        aggregation=aggregation,
+        min_cells=min_cells,
+        mode=mode,
+        min_cells_per_group=min_cells_per_group,
+        min_groups_for_A=min_groups_for_A,
+        threads=threads,
+    )
+
+    meta = dict(getattr(result, "meta", {}) or {})
+    meta.setdefault("gene_set", gene_set)
+    meta.setdefault("work_dir", str(work_path))
+    if cluster_id is not None:
+        meta["cluster_id"] = str(cluster_id)
+    result.meta = meta
+
+    visualizer = SSGSEAVisualizer()
+    heatmap_path = visualizer.plot(result, top_n=top_n_heatmap, outdir=str(outdir))
+
+    evaluator = SSGSEAEvaluator()
+    eval_msg, eval_paths = evaluator.evaluate(
+        result,
+        top_k=top_k_terms,
+        fdr_threshold=fdr_threshold,
+        return_paths=True,
+        outdir=str(outdir),
+    )
+
+    paths_dict: Dict[str, str] = {}
+    for key, value in (eval_paths or {}).items():
+        if value:
+            paths_dict[key] = str(Path(value).expanduser().resolve())
+    if heatmap_path:
+        paths_dict["heatmap"] = str(Path(heatmap_path).expanduser().resolve())
+
+    scores_path = None
+    if result.scores is not None and not result.scores.empty:
+        scores_path = outdir / "ssgsea_scores.tsv"
+        result.scores.to_csv(scores_path, sep="\t")
+        paths_dict["scores"] = str(scores_path.resolve())
+
+    top_terms_records: List[Dict[str, Any]] = []
+    if result.top_terms is not None and not result.top_terms.empty:
+        for row in result.top_terms.head(top_k_terms).to_dict(orient="records"):
+            cleaned: Dict[str, Any] = {}
+            for key, value in row.items():
+                if isinstance(value, (np.floating, np.float32, np.float64)):
+                    cleaned[key] = float(value)
+                elif isinstance(value, (np.integer, np.int64, np.int32)):
+                    cleaned[key] = int(value)
+                else:
+                    cleaned[key] = value
+            top_terms_records.append(cleaned)
+
+    payload = {
+        "status": "success",
+        "message": eval_msg,
+        "result_paths": paths_dict,
+        "top_terms": top_terms_records,
+        "meta": result.meta,
+    }
+
+    return json.dumps(payload, ensure_ascii=False)
 
 
 if __name__ == "__main__":
