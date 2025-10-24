@@ -18,7 +18,6 @@ TOOLS = [
     cluster_and_diff,
     annotate_with_markers,
     interpret_cluster_results,
-    run_ora_enrichment,
     run_ssgsea_enrichment,
     run_cellphonedb_core,
     run_pseudotime_analysis,

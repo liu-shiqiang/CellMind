@@ -360,7 +360,6 @@ class ORAFactory(EnrichmentFactory):
 class ORAEnrichmentArgs(BaseModel):
     input_file: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
     work_dir: str = Field(..., description="Work directory where enrichment outputs will be stored.")
-    celltype_col: str = Field(default="pred_celltype", description="Column in AnnData.obs with cell type labels.")
     target_celltype: Optional[str] = Field(default=None, description="Specific cell type to extract marker genes for enrichment.")
     gene_set: str = Field(default="kegg", description="Gene set library to use (e.g. 'kegg' or 'go').")
     top_n: Optional[int] = Field(default=None, description="Number of top marker genes to include from the selected population.")
@@ -375,14 +374,13 @@ class ORAEnrichmentArgs(BaseModel):
 def run_ora_enrichment(
     input_file: str,
     work_dir: str,
-    celltype_col: str = "pred_celltype",
     target_celltype: Optional[str] = None,
     gene_set: str = "kegg",
     top_n: Optional[int] = None,
     enrichr_lib_path: Optional[str] = None,
     gene_list: Optional[List[str]] = None,
     gene_list_file: Optional[str] = None,
-    list_label: Optional[str] = None,
+    list_label: Optional[str] = None, 
     cluster_id: Optional[str] = None,
 ) -> str:
     """Run ORA enrichment using marker genes derived from a cluster or a custom gene list."""
@@ -399,7 +397,7 @@ def run_ora_enrichment(
     analyzer = ORAAnalyzer()
     result = analyzer.run(
         input_file=str(input_path),
-        celltype_col=celltype_col,
+        celltype_col="pred_celltype",
         target_celltype=target_celltype,
         gene_set=gene_set,
         top_n=top_n,
