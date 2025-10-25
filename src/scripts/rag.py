@@ -6,6 +6,11 @@ import asyncio
 from tqdm.asyncio import tqdm
 from typing import Any, Dict, Iterable, List, Optional
 
+try:
+    import torch
+except ImportError:  # pragma: no cover - optional dependency
+    torch = None
+
 import scanpy as sc
 
 import chromadb
@@ -36,10 +41,75 @@ class BioKnowledgeRag:
         self.vector_store_path = vector_store_path
         self.embedding_model = embedding_model
         self.top_k = top_k
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name='/home/share/huadjyin/home/liushiqiang/pretrained_model/all-MiniLM-L6-v2'
-        )
+        self._embedding_device: Optional[str] = None
+        self._current_collection: Optional[str] = None
+
+        model_override = os.environ.get("BIO_RAG_EMBEDDING_MODEL_PATH")
+        if model_override:
+            self.embedding_model = model_override
+        elif os.path.exists(self.embedding_model):
+            # use provided path directly if it exists
+            pass
+        else:
+            # fall back to historical hard-coded path for backwards compatibility
+            self.embedding_model = (
+                "/home/share/huadjyin/home/liushiqiang/pretrained_model/all-MiniLM-L6-v2"
+            )
+
+        device_override = os.environ.get("BIO_RAG_EMBEDDING_DEVICE")
+        self.embeddings = self._load_embeddings(device_override)
         self.vector_stores: Dict[str, Chroma] = {}
+
+    def _load_embeddings(self, preferred_device: Optional[str] = None) -> HuggingFaceEmbeddings:
+        """Initialise HuggingFace embeddings with device fallbacks."""
+
+        candidates = []
+        if preferred_device:
+            candidates.append(preferred_device)
+        else:
+            if torch is not None and torch.cuda.is_available():
+                candidates.append("cuda")
+            candidates.append("cpu")
+
+        last_error: Optional[Exception] = None
+        for device in candidates:
+            try:
+                embeddings = HuggingFaceEmbeddings(
+                    model_name=self.embedding_model,
+                    model_kwargs={"device": device},
+                    encode_kwargs={"device": device},
+                )
+                self._embedding_device = device
+                self.logger.info("Loaded RAG embeddings on %s", device.upper())
+                return embeddings
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self.logger.warning(
+                    "Failed to load embeddings on %s: %s", device.upper(), exc
+                )
+                last_error = exc
+
+        if last_error:
+            raise last_error
+
+        raise RuntimeError("Failed to initialise embeddings for BioKnowledgeRag")
+
+    def _create_vector_store(self, collection_name: str) -> Chroma:
+        return Chroma(
+            collection_name=collection_name,
+            embedding_function=self.embeddings,
+            persist_directory=self.vector_store_path,
+            create_collection_if_not_exists=True,
+        )
+
+    def _refresh_vector_stores(self) -> None:
+        if not self.vector_stores:
+            return
+
+        for name in list(self.vector_stores.keys()):
+            self.vector_stores[name] = self._create_vector_store(name)
+
+        if self._current_collection and self._current_collection in self.vector_stores:
+            self.vector_store = self.vector_stores[self._current_collection]
 
     def init_vector_store(self,collection_name: str) -> None:
         """create or load vector store"""
@@ -48,17 +118,13 @@ class BioKnowledgeRag:
                 self.logger.info(f"Vector store {collection_name} already exists.")
                 self.vector_store = self.vector_stores[collection_name]
                 return self.vector_store
-            
+
             if not os.path.exists(self.vector_store_path):
                 os.makedirs(self.vector_store_path, exist_ok=True)
 
-            self.vector_store = Chroma(
-                collection_name=collection_name,
-                embedding_function=self.embeddings,
-                persist_directory=self.vector_store_path,
-                create_collection_if_not_exists=True
-            )
+            self.vector_store = self._create_vector_store(collection_name)
             self.vector_stores[collection_name] = self.vector_store
+            self._current_collection = collection_name
             self.logger.info(f"Vector store '{collection_name}' initialized and cached.")
             return self.vector_store
         except Exception as e:
@@ -149,12 +215,25 @@ class BioKnowledgeRag:
             collection = self.vector_store if collection_name is None else self.vector_stores[collection_name]
             if collection is None:
                 raise ValueError(f"Vector store{collection_name} is not initialized.")\
-            
+
             top_k = top_k or self.top_k
             results = collection.similarity_search(query , k=top_k)
             return results
         except Exception as e:
-            self.logger.error(f"Query failed: {str(e)}")
+            message = str(e)
+            if (
+                self._embedding_device != "cpu"
+                and any(keyword in message for keyword in ("CUBLAS_STATUS_ALLOC_FAILED", "CUDA error"))
+            ):
+                self.logger.warning(
+                    "GPU embedding query failed (%s); switching to CPU fallback.",
+                    message,
+                )
+                self.embeddings = self._load_embeddings("cpu")
+                self._refresh_vector_stores()
+                return self.query(query, collection_name, top_k)
+
+            self.logger.error(f"Query failed: {message}")
             raise e
     
     def rag_context_generate(self,query:str,collection_name:str = None,top_k:int = None):
