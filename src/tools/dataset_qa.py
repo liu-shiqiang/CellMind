@@ -153,6 +153,43 @@ def _prepare_dataset_context(
     return context_for_qa
 
 
+def retrieve_bio_context(
+    question: str,
+    *,
+    work_dir: Optional[str] = None,
+    top_k_local: int = 3,
+    top_k_pubmed: int = 3,
+) -> Dict[str, Any]:
+    """Collect supporting documents for general bioinformatics question answering."""
+
+    local_docs: List = []
+    pubmed_docs: List = []
+    context_sections: List[str] = []
+
+    if top_k_local > 0:
+        local_docs = _collect_local_rag(question, top_k=top_k_local)
+        if local_docs:
+            context_sections.append("【本地知识库检索】\n" + _format_documents(local_docs, "Local"))
+
+    if work_dir and top_k_pubmed > 0:
+        try:
+            work_path = Path(work_dir).expanduser().resolve()
+        except Exception:
+            work_path = None
+        if work_path and work_path.exists():
+            pubmed_docs = _collect_pubmed_rag(work_path, question, top_k=top_k_pubmed)
+            if pubmed_docs:
+                context_sections.append("【PubMed 检索摘要】\n" + _format_documents(pubmed_docs, "PubMed"))
+
+    return {
+        "local_docs": local_docs,
+        "pubmed_docs": pubmed_docs,
+        "context_sections": context_sections,
+        "local_reference_count": len(local_docs),
+        "pubmed_reference_count": len(pubmed_docs),
+    }
+
+
 @tool("dataset_bio_qa", args_schema=DatasetQAArgs)
 def dataset_bio_qa(
     work_dir: str,
@@ -178,18 +215,20 @@ def dataset_bio_qa(
     celltype_report_path = interpretation_dir / "celltype_interpretation_report.md"
     celltype_report_text = _read_text(celltype_report_path)
 
-    local_docs = _collect_local_rag(question, top_k=top_k_local)
-    pubmed_docs = _collect_pubmed_rag(work_path, question, top_k=top_k_pubmed)
+    references = retrieve_bio_context(
+        question,
+        work_dir=str(work_path),
+        top_k_local=top_k_local,
+        top_k_pubmed=top_k_pubmed,
+    )
 
     context_sections = [
         "【整合分析结果】\n" + json.dumps(dataset_context, ensure_ascii=False, indent=2)
     ]
     if dataset_report_text:
         context_sections.append("【数据集解读报告】\n" + dataset_report_text)
-    if local_docs:
-        context_sections.append("【本地知识库检索】\n" + _format_documents(local_docs, "Local"))
-    if pubmed_docs:
-        context_sections.append("【PubMed 检索摘要】\n" + _format_documents(pubmed_docs, "PubMed"))
+    if references["context_sections"]:
+        context_sections.extend(references["context_sections"])
     if celltype_report_text:
         context_sections.append("【细胞类型解读报告】\n" + celltype_report_text)
 
@@ -225,8 +264,8 @@ def dataset_bio_qa(
         "answer": answer_text,
         "dataset_report": str(dataset_report_path) if dataset_report_path.exists() else None,
         "celltype_report": str(celltype_report_path) if celltype_report_path.exists() else None,
-        "local_hits": [doc.metadata for doc in local_docs],
-        "pubmed_hits": [doc.metadata for doc in pubmed_docs],
+        "local_hits": [doc.metadata for doc in references["local_docs"]],
+        "pubmed_hits": [doc.metadata for doc in references["pubmed_docs"]],
     }
     try:
         with qa_history_path.open("a", encoding="utf-8") as handle:
@@ -241,8 +280,8 @@ def dataset_bio_qa(
             "dataset_report_path": str(dataset_report_path) if dataset_report_path.exists() else None,
             "celltype_report_path": str(celltype_report_path) if celltype_report_path.exists() else None,
             "qa_history_path": str(qa_history_path),
-            "local_reference_count": len(local_docs),
-            "pubmed_reference_count": len(pubmed_docs),
+            "local_reference_count": references["local_reference_count"],
+            "pubmed_reference_count": references["pubmed_reference_count"],
         },
         ensure_ascii=False,
     )
