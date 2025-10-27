@@ -1,6 +1,5 @@
 import re
 import json
-import operator
 from typing import Annotated, List, Tuple, Union, Dict, Any, Optional
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
@@ -9,7 +8,6 @@ import logging
 import structlog
 
 from langchain import hub
-from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
 from langchain_core.messages import ToolMessage, AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -21,7 +19,9 @@ from langgraph.checkpoint.memory import MemorySaver
 
 
 from src.agent.tool_registry import TOOLS
-from src.utils.llm_manager import LLMManager
+from config.setting import settings
+from src.tools.dataset_qa import retrieve_bio_context
+from src.utils.llm_manager import get_llm_manager
 from src.utils.path_manager import path_manager, extract_paths_from_objective, validate_h5ad_file, create_analysis_work_dir
 from src.memory.conversation_memory import ConversationMemoryStore
 
@@ -258,6 +258,159 @@ def _apply_intent_result(
     logger.info("[Intent Recognition] Final decision: %s", trace_payload)
 
 
+def _safe_json_loads(payload: Any) -> Optional[Dict[str, Any]]:
+    """Best-effort JSON decoding utility used for tool outputs."""
+
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _extract_latest_user_question(messages: List[BaseMessage], fallback: str = "") -> str:
+    """Return the most recent human utterance that looks like a question."""
+
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            content = (message.content or "").strip()
+            if not content:
+                continue
+            if content.lower().startswith("user dataset available at:"):
+                continue
+            return content
+    return fallback
+
+
+def _build_dataset_followup_message(dataset_result: Dict[str, Any], work_dir: Optional[str]) -> str:
+    """Render a follow-up message after dataset analysis is completed."""
+
+    question = (dataset_result.get("question") or "").strip()
+    answer = (dataset_result.get("answer") or "").strip()
+    dataset_report_path = dataset_result.get("dataset_report_path") or dataset_result.get("dataset_report")
+    celltype_report_path = dataset_result.get("celltype_report_path") or dataset_result.get("celltype_report")
+    qa_history_path = dataset_result.get("qa_history_path")
+    local_refs = dataset_result.get("local_reference_count", dataset_result.get("local_hits"))
+    pubmed_refs = dataset_result.get("pubmed_reference_count", dataset_result.get("pubmed_hits"))
+
+    summary_lines = [
+        "### 数据集分析完成",
+        "我已基于上传的数据集自动完成质量控制、解读并生成报告。",
+    ]
+
+    if work_dir:
+        summary_lines.append(f"- 工作目录：`{work_dir}`")
+    if dataset_report_path:
+        summary_lines.append(f"- 数据集报告：`{dataset_report_path}`")
+    if celltype_report_path:
+        summary_lines.append(f"- 细胞类型报告：`{celltype_report_path}`")
+    if qa_history_path:
+        summary_lines.append(f"- 问答历史：`{qa_history_path}`")
+
+    if question:
+        summary_lines.append("")
+        summary_lines.append(f"**原始问题**：{question}")
+    if answer:
+        summary_lines.append("**回答摘要**：")
+        summary_lines.append(answer)
+
+    if isinstance(local_refs, int) or isinstance(pubmed_refs, int):
+        summary_lines.append("")
+        summary_lines.append("参考来源统计：")
+        summary_lines.append(f"- 本地知识库引用：{local_refs if isinstance(local_refs, int) else len(local_refs or [])} 条")
+        summary_lines.append(f"- PubMed 摘要引用：{pubmed_refs if isinstance(pubmed_refs, int) else len(pubmed_refs or [])} 条")
+
+    summary_lines.append("")
+    summary_lines.append("如果你还有其他生物信息学问题，请继续提问，我会结合知识库和对话历史继续解答。")
+    return "\n".join(summary_lines)
+
+
+def _generate_bio_rag_answer(question: str, state: "AgentState") -> Tuple[str, Dict[str, Any]]:
+    """Generate a conversational answer enhanced with RAG references."""
+
+    try:
+        top_k_local = int(getattr(settings, "RETRIVE_TOP_K", 3))
+    except (TypeError, ValueError):
+        top_k_local = 3
+    top_k_local = max(1, top_k_local)
+
+    work_dir = state.get("work_dir")
+
+    try:
+        references = retrieve_bio_context(
+            question,
+            work_dir=work_dir,
+            top_k_local=top_k_local,
+            top_k_pubmed=3,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("[Response] Failed to retrieve RAG references: %s", exc)
+        references = {
+            "local_docs": [],
+            "pubmed_docs": [],
+            "context_sections": [],
+            "local_reference_count": 0,
+            "pubmed_reference_count": 0,
+        }
+
+    context_sections = list(references.get("context_sections", []))
+    dataset_result = state.get("analysis_notes", {}).get("dataset_bio_qa")
+    if dataset_result:
+        dataset_summary: List[str] = []
+        dataset_question = dataset_result.get("question")
+        dataset_answer = dataset_result.get("answer")
+        if dataset_question:
+            dataset_summary.append(f"- 初始数据集问题：{dataset_question}")
+        if dataset_answer:
+            trimmed_answer = dataset_answer.strip()
+            if len(trimmed_answer) > 800:
+                trimmed_answer = trimmed_answer[:800] + "…"
+            dataset_summary.append(f"- 数据集解读摘要：{trimmed_answer}")
+        dataset_report = dataset_result.get("dataset_report_path")
+        if dataset_report:
+            dataset_summary.append(f"- 报告路径：`{dataset_report}`")
+        if dataset_summary:
+            context_sections.insert(0, "【数据集背景】\n" + "\n".join(dataset_summary))
+
+    context_text = "\n\n".join(section.strip() for section in context_sections if section).strip()
+    if not context_text:
+        context_text = "（未检索到额外参考资料，也请基于专业知识完成解答。）"
+
+    system_message = SystemMessage(
+        content=(
+            "You are a senior biomedical scientist. Always provide precise, well-structured "
+            "answers in Chinese unless the user explicitly requests another language."
+        )
+    )
+    human_message = HumanMessage(
+        content=(
+            "请参考以下资料回答用户的问题，并在无法检索到外部知识时结合专业知识推理：\n\n"
+            f"{context_text}\n\n"
+            f"问题：{question}\n\n"
+            "请按照以下结构回答：\n"
+            "## 解答\n- 给出直接、严谨的回答\n"
+            "## 证据\n- 本地知识库：...（如无写'无'）\n- PubMed：...（如无写'无'）\n"
+            "## 建议\n- 如需进一步实验或数据分析，请给出建议\n"
+        )
+    )
+
+    response_message = llm.invoke([system_message, human_message])
+    answer_text = getattr(response_message, "content", str(response_message))
+    if isinstance(answer_text, list):
+        answer_text = "\n".join(str(part) for part in answer_text)
+
+    metadata = {
+        "question": question,
+        "local_reference_count": references.get("local_reference_count", 0),
+        "pubmed_reference_count": references.get("pubmed_reference_count", 0),
+    }
+    return answer_text, metadata
+
+
 def _clean_replanner_output(content: str) -> str:
     """Remove common wrappers the LLM may add around JSON output."""
 
@@ -320,17 +473,9 @@ conversation_memory = ConversationMemoryStore()
 tools = TOOLS
 tools_by_name = {tool.name: tool for tool in tools}
 
-llm = ChatOllama(model="qwen3:30b", 
-                 temperature=0.6,
-                 base_url="http://localhost:11434"
-                 )
-
-llm_tool = ChatOllama(model="qwen3:30b", 
-                 temperature=0.6,
-                 base_url="http://localhost:11434"
-                 )
-
-llm_with_tools = llm_tool.bind_tools(tools)
+llm_manager = get_llm_manager()
+llm = llm_manager.get_llm()
+llm_with_tools = llm_manager.get_llm_with_tools(tools)
 
 class Intent(BaseModel):
     """Intent recognition schema"""
@@ -406,6 +551,9 @@ class AgentState(TypedDict):
     max_replan_attempts: int
     execution_status: str
     intent_trace: Dict[str, Any]
+    work_dir: Optional[str]
+    tool_history: List[Dict[str, Any]]
+    analysis_notes: Dict[str, Any]
 
 # User intent recognition
 async def intent_recognition(state: AgentState) -> AgentState:
@@ -485,31 +633,64 @@ Guidelines:
     return state
 
 async def response(state: AgentState):
+    """Final response generation with dataset follow-up and RAG support."""
 
-    response_prompt = """
-You are a helpful biomedical assistant who can view the user's Q&A history and give professional answers to the user's questions.
+    analysis_notes = state.setdefault("analysis_notes", {})
+    final_message: Optional[str] = None
 
-You can observe the environment and identify potential errors that may occur during program execution. When you notice that the most recent message in history is a program error, provide users with possible solutions
+    try:
+        dataset_result = analysis_notes.get("dataset_bio_qa")
+        if dataset_result:
+            work_dir = dataset_result.get("work_dir") or state.get("work_dir")
+            final_message = _build_dataset_followup_message(dataset_result, work_dir)
+        else:
+            question = _extract_latest_user_question(
+                state.get("messages", []),
+                state.get("objective", ""),
+            )
+            if question:
+                answer_text, rag_metadata = _generate_bio_rag_answer(question, state)
+                analysis_notes["last_rag"] = {
+                    **rag_metadata,
+                    "answer": answer_text,
+                }
+                final_message = answer_text.strip()
+            else:
+                logger.warning("[Response] No user question detected; falling back to default prompt.")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.exception("[Response] Structured answer generation failed: %s", exc)
+        final_message = None
 
-Requirement: You must give an answer.
+    if not final_message:
+        response_prompt = (
+            "You are a helpful biomedical assistant who can view the user's Q&A history and give professional answers to the "
+            "user's questions. If the latest messages contain execution errors, propose concrete next steps."
+        )
+        conversation_history = list(state.get("messages", []))
+        if not conversation_history or conversation_history[-1].type != "human":
+            objective = state.get("objective")
+            if objective:
+                conversation_history.append(HumanMessage(content=objective))
 
-"""
-    
-    conversation_history = list(state.get("messages", []))
-    if not conversation_history or conversation_history[-1].type != "human":
-        objective = state.get("objective")
-        if objective:
-            conversation_history.append(HumanMessage(content=objective))
+        fallback_messages = [SystemMessage(content=response_prompt)] + conversation_history
+        fallback_response = llm.invoke(fallback_messages)
+        final_message = getattr(fallback_response, "content", str(fallback_response))
+        if isinstance(final_message, list):
+            final_message = "\n".join(str(part) for part in final_message)
 
-    message = [SystemMessage(content = response_prompt)] + conversation_history
-    response = llm.invoke(message)
+    if analysis_notes.get("dataset_bio_qa"):
+        if "继续提问" not in final_message:
+            final_message = (
+                final_message.rstrip()
+                + "\n\n如果你还有其他生物信息学问题，请继续提问，我会结合知识库和对话历史继续解答。"
+            )
+    else:
+        final_message = final_message.rstrip() + "\n\n如需进一步探讨，请继续提问。"
 
-    logger.info(f"[Response] Response content: {response.content}")
-
-    state["messages"].append(AIMessage(content=response.content))
-
+    state["messages"].append(AIMessage(content=final_message))
     state["next_step"] = "end"
 
+    logger.info("[Response] Response content: %s", final_message)
     return state
 
 
@@ -675,16 +856,36 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
                     tool_call_id=tool_call_id
                 )
             )
-        else: 
+        else:
             try:
                 tool_to_call: BaseTool = tools_by_name[tool_name]
-                
+
                 if hasattr(tool_to_call, 'ainvoke'):
                     tool_result = await tool_to_call.ainvoke(tool_args)
                 else:
                     tool_result = tool_to_call.invoke(tool_args)
 
-                result_str = f"<excute>Tool {tool_name} call result: {str(tool_result)}</excute>"
+                state.setdefault("tool_history", []).append(
+                    {
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result": tool_result,
+                    }
+                )
+
+                if tool_name == "dataset_bio_qa":
+                    dataset_payload = _safe_json_loads(tool_result)
+                    if dataset_payload:
+                        state.setdefault("analysis_notes", {})["dataset_bio_qa"] = dataset_payload
+                        if "work_dir" not in dataset_payload and state.get("work_dir"):
+                            dataset_payload["work_dir"] = state.get("work_dir")
+
+                if isinstance(tool_result, (dict, list)):
+                    tool_result_str = json.dumps(tool_result, ensure_ascii=False)
+                else:
+                    tool_result_str = str(tool_result)
+
+                result_str = f"<excute>Tool {tool_name} call result: {tool_result_str}</excute>"
                 print(f"Tool '{tool_name}' executed successfully.")
 
                 if state.get("plan"):
@@ -944,8 +1145,14 @@ Full Conversation History:
                 print(f"Updated plan: {updated_plan}")
                 if not updated_plan:
                     state["execution_status"] = "completed"
+                    state["next_step"] = "response"
                 else:
                     state["execution_status"] = "in_progress"
+                    state["next_step"] = "general_executor"
+            else:
+                # In the unlikely event there was no active plan entry, finish gracefully.
+                state["next_step"] = "response"
+                state["execution_status"] = state.get("execution_status", "completed") or "completed"
             state["replan_attempts"] = 0
 
         elif action == "request_user_input":
@@ -1102,6 +1309,9 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         max_replan_attempts=4,
         execution_status="in_progress",
         intent_trace={},
+        work_dir=None,
+        tool_history=[],
+        analysis_notes={},
 
     )
 
