@@ -21,6 +21,7 @@ class Settings:
     LLM_MODEL = "qwen3:30b"
     LLM_BASE_URL = "http://localhost:11434"
     LLM_TEMPERATURE = 0.6
+    LLM_TOOL_MODEL = "qwen3:30b"
 
 
 
