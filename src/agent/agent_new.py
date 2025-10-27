@@ -325,7 +325,7 @@ llm = ChatOllama(model="qwen3:30b",
                  base_url="http://localhost:11434"
                  )
 
-llm_tool = ChatOllama(model="qwen3:8b", 
+llm_tool = ChatOllama(model="qwen3:30b", 
                  temperature=0.6,
                  base_url="http://localhost:11434"
                  )
@@ -573,7 +573,7 @@ IMPORTANT:
                 tools_info=tools_info
             )
 
-            print(f"plan_prompt{plan_prompt} type:{type(plan_prompt)}")
+            # print(f"plan_prompt{plan_prompt} type:{type(plan_prompt)}")
 
             logger.info(f"[General Planner] Attempting to generate plan (Attempt {attempt + 1}/{max_attempts})")
             if attempt > 0 and previous_errors_feedback:
