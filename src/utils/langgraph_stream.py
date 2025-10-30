@@ -111,6 +111,10 @@ def create_initial_state(
         "max_replan_attempts": 4,
         "execution_status": "in_progress",
         "intent_trace": {},
+        "work_dir": None,
+        "tool_history": [],
+        "analysis_notes": {},
+        "recognized_intents": [],
     }
     return state, resolved_thread_id
 

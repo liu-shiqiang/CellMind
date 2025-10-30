@@ -1,3 +1,8 @@
+import pytest
+
+pytest.importorskip("torch", reason="Torch is required for tool integration tests")
+pytest.importorskip("langchain_core", reason="LangChain core library not available")
+
 from src.scripts.llm_loader import llm
 from langchain_core.tools import BaseTool
 from src.tools.load_h5ad import load_h5ad_data

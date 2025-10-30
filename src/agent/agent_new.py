@@ -1,6 +1,6 @@
 import re
 import json
-from typing import Annotated, List, Tuple, Union, Dict, Any, Optional
+from typing import Annotated, List, Tuple, Union, Dict, Any, Optional, NotRequired
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Literal
@@ -244,6 +244,7 @@ def _apply_intent_result(
         result.is_task = False
 
     state["intents"] = task_intents if result.is_task else []
+    state["recognized_intents"] = [intent.model_dump() for intent in result.intents]
     state["next_step"] = "planner" if result.is_task else "response"
     trace_payload = {
         "objective": state.get("objective"),
@@ -256,6 +257,116 @@ def _apply_intent_result(
     }
     state["intent_trace"] = trace_payload
     logger.info("[Intent Recognition] Final decision: %s", trace_payload)
+
+
+def _get_recognized_intent_labels(state: "AgentState") -> List[str]:
+    """Return the normalized intent labels detected for the current turn."""
+
+    raw_intents = state.get("recognized_intents", []) or []
+    labels: List[str] = []
+
+    for item in raw_intents:
+        if isinstance(item, Intent):
+            labels.append(item.intent)
+        elif isinstance(item, dict):
+            labels.append(_normalize_intent_label(item.get("intent")))
+        elif hasattr(item, "intent"):
+            labels.append(_normalize_intent_label(getattr(item, "intent", "")))
+
+    return labels
+
+
+def _format_memory_response(state: "AgentState") -> str:
+    """Build a conversational reply describing the stored long-term memory."""
+
+    summary = (state.get("memory_summary") or "").strip()
+    records = state.get("memory_records") or []
+
+    if not summary and not records:
+        return (
+            "当前会话没有可供检索的长期记忆记录。如需我在未来记住关键信息，"
+            "请明确告知我哪些结论或文件需要保存。"
+        )
+
+    lines: List[str] = ["### 长期记忆检索结果"]
+
+    if summary:
+        lines.append("")
+        lines.append("**会话摘要**")
+        lines.append(summary)
+
+    if records:
+        lines.append("")
+        lines.append("**历史任务记录**")
+        for idx, record in enumerate(records, 1):
+            if isinstance(record, dict):
+                record_dict = record
+            else:
+                record_dict = getattr(record, "__dict__", {})
+
+            objective = record_dict.get("objective") or "（未记录目标）"
+            created_at = record_dict.get("created_at") or "时间未知"
+            record_summary = record_dict.get("summary") or ""
+            highlights = record_dict.get("highlights") or ""
+
+            lines.append(f"{idx}. {objective}（{created_at}）")
+            if record_summary:
+                lines.append(f"   - 摘要：{record_summary}")
+            if highlights:
+                lines.append(f"   - 重点：{highlights}")
+
+    return "\n".join(lines).strip()
+
+
+def _format_status_response(state: "AgentState") -> str:
+    """Render a structured status update for project progress inquiries."""
+
+    status_text = (state.get("execution_status") or "未开始").strip() or "未开始"
+    lines: List[str] = ["### 项目状态更新", f"- 当前执行状态：{status_text}"]
+
+    remaining_plan = [step for step in state.get("plan", []) if isinstance(step, str) and step.strip()]
+    if remaining_plan:
+        lines.append("- 待执行步骤：")
+        for idx, step in enumerate(remaining_plan, 1):
+            lines.append(f"  {idx}. {step.strip()}")
+
+    tool_history = state.get("tool_history") or []
+    if tool_history:
+        lines.append("- 最近的工具调用：")
+        for entry in tool_history[-3:]:
+            description_parts: List[str] = []
+            tool_name = ""
+            if isinstance(entry, dict):
+                tool_name = entry.get("tool") or entry.get("tool_name") or "未知工具"
+                outcome = entry.get("status") or entry.get("result_status") or entry.get("outcome")
+                if outcome:
+                    description_parts.append(str(outcome))
+                error = entry.get("error") or entry.get("message")
+                if error:
+                    description_parts.append(str(error))
+            else:
+                tool_name = str(getattr(entry, "tool", getattr(entry, "tool_name", "未知工具")))
+            detail = "；".join(part for part in description_parts if part)
+            if detail:
+                lines.append(f"  • {tool_name}：{detail}")
+            else:
+                lines.append(f"  • {tool_name}")
+
+    analysis_notes = state.get("analysis_notes") or {}
+    completed_steps = analysis_notes.get("completed_steps")
+    if isinstance(completed_steps, list) and completed_steps:
+        lines.append("- 已完成步骤：")
+        for idx, step in enumerate(completed_steps, 1):
+            lines.append(f"  {idx}. {step}")
+
+    recent_note = analysis_notes.get("last_note")
+    if isinstance(recent_note, str) and recent_note.strip():
+        lines.append(f"- 最新备注：{recent_note.strip()}")
+
+    if len(lines) == 2:
+        lines.append("- 尚未记录详细的执行历史。")
+
+    return "\n".join(lines).strip()
 
 
 def _safe_json_loads(payload: Any) -> Optional[Dict[str, Any]]:
@@ -554,6 +665,7 @@ class AgentState(TypedDict):
     work_dir: Optional[str]
     tool_history: List[Dict[str, Any]]
     analysis_notes: Dict[str, Any]
+    recognized_intents: NotRequired[List[Dict[str, Any]]]
 
 # User intent recognition
 async def intent_recognition(state: AgentState) -> AgentState:
@@ -639,8 +751,14 @@ async def response(state: AgentState):
     final_message: Optional[str] = None
 
     try:
+        recognized_labels = _get_recognized_intent_labels(state)
         dataset_result = analysis_notes.get("dataset_bio_qa")
-        if dataset_result:
+
+        if "memory_query" in recognized_labels:
+            final_message = _format_memory_response(state)
+        elif "status_check" in recognized_labels:
+            final_message = _format_status_response(state)
+        elif dataset_result:
             work_dir = dataset_result.get("work_dir") or state.get("work_dir")
             final_message = _build_dataset_followup_message(dataset_result, work_dir)
         else:
@@ -1312,6 +1430,7 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
         work_dir=None,
         tool_history=[],
         analysis_notes={},
+        recognized_intents=[],
 
     )
 
