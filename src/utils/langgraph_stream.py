@@ -6,13 +6,14 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from src.agent.agent_new import (
     AgentState,
     build_graph,
     build_project_state_message,
     conversation_memory,
+    create_initial_state,
     serialise_project_state,
 )
 
@@ -92,56 +93,6 @@ def _fingerprint(value: Any) -> str:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, default=_plan_default)
     except TypeError:
         return str(value)
-
-
-def create_initial_state(
-    objective: str,
-    input_files: Optional[List[str]],
-    thread_id: Optional[str],
-) -> Tuple[AgentState, str]:
-    resolved_thread_id = (thread_id or str(uuid4())).strip() or str(uuid4())
-    memory_context = conversation_memory.load_context(thread_id=resolved_thread_id, objective=objective)
-    memory_messages = conversation_memory.build_context_messages(memory_context)
-    project_state = json.loads(json.dumps(memory_context.project_state)) if memory_context.project_state else {}
-    project_message = build_project_state_message(project_state)
-    if project_message:
-        memory_messages.insert(0, SystemMessage(content=project_message))
-
-    state: AgentState = {
-        "objective": objective,
-        "messages": list(memory_messages),
-        "input_files": input_files or [],
-        "intents": [],
-        "plan": [],
-        "next_step": None,
-        "memory_summary": memory_context.summary,
-        "memory_records": [record.__dict__ for record in memory_context.records],
-        "thread_id": resolved_thread_id,
-        "replan_attempts": 0,
-        "max_replan_attempts": 4,
-        "execution_status": "in_progress",
-        "intent_trace": {},
-        "work_dir": None,
-        "tool_history": [],
-        "analysis_notes": {},
-        "recognized_intents": [],
-        "project_state": project_state,
-    }
-
-    if project_state:
-        datasets = project_state.get("datasets", {})
-        active_dataset = project_state.get("active_dataset") or project_state.get("last_dataset")
-        if active_dataset and isinstance(datasets.get(active_dataset), dict):
-            active_entry = datasets[active_dataset]
-            work_dir = active_entry.get("work_dir")
-            if work_dir:
-                state["work_dir"] = work_dir
-            saved_inputs = active_entry.get("input_files")
-            if saved_inputs and not state["input_files"]:
-                if isinstance(saved_inputs, list):
-                    state["input_files"] = list(saved_inputs)
-
-    return state, resolved_thread_id
 
 
 def _extract_final_ai_message(messages: Iterable[BaseMessage]) -> Optional[BaseMessage]:

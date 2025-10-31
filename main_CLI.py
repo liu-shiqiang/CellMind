@@ -7,8 +7,10 @@ import asyncio
 import scanpy as sc
 import argparse
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 from uuid import uuid4
+
+from langchain_core.messages import BaseMessage
 
 from src.scripts.utils import get_data_path, read_scrna_data
 from src.agent.agent_new import run_objective
@@ -106,17 +108,17 @@ def get_files_interactively() -> List[str]:
 
 
 
-def main():
+def main(persistent_thread_id: Optional[str] = None) -> Optional[str]:
     args = parse_args()
-    
+
     # 获取用户任务描述
     print("\n Please enter the analysis task description (e.g. 'Cell Type Annotation', 'Pathway Enrichment Analysis',' Regulatory Network Inference '):")
     user_task = input("task: ").strip()
-    
+
     if not user_task:
         print("Task description cannot be empty")
-        return
-    
+        return persistent_thread_id
+
     # 获取输入文件
     input_files = []
     
@@ -161,10 +163,14 @@ def main():
                 print(f"  {i}. {file_path}")
         except FileNotFoundError as e:
             print(f"{e}")
-            return
+            return persistent_thread_id
     else:
         validated_files = []
-    
+
+    resolved_thread_id = (args.thread_id or persistent_thread_id or str(uuid4())).strip()
+    if not resolved_thread_id:
+        resolved_thread_id = str(uuid4())
+
     # 执行任务
     print(f"\nStart executing the task: {user_task}")
     if validated_files:
@@ -173,7 +179,7 @@ def main():
     if args.stream:
         print("\nStreaming agent events...\n")
 
-        async def _stream_objective():
+        async def _stream_objective() -> Tuple[Optional[BaseMessage], Optional[Any]]:
             run_id = str(uuid4())
 
             async def _printer(event: dict) -> None:
@@ -182,7 +188,7 @@ def main():
             final_message, error_info = await run_agent_stream(
                 objective=user_task,
                 input_files=validated_files,
-                thread_id=args.thread_id,
+                thread_id=resolved_thread_id,
                 run_id=run_id,
                 event_handler=_printer,
             )
@@ -192,7 +198,7 @@ def main():
             final_message, error_info = asyncio.run(_stream_objective())
         except Exception as e:
             print(f"\nTask execution failed: {e}")
-            return
+            return persistent_thread_id or resolved_thread_id
 
         if final_message is not None:
             print("\nMission accomplished!")
@@ -205,12 +211,16 @@ def main():
             print("\nMission completed without a final response message.")
     else:
         try:
-            result = asyncio.run(run_objective(user_task, validated_files))
+            result = asyncio.run(
+                run_objective(user_task, validated_files, thread_id=resolved_thread_id)
+            )
             print(f"\nMission accomplished!")
             print(f"📊 结果: {result}")
         except Exception as e:
             print(f"\nTask execution failed: {e}")
+            return persistent_thread_id or resolved_thread_id
 
+    return resolved_thread_id
 
 if __name__ == '__main__':
 
@@ -226,12 +236,15 @@ if __name__ == '__main__':
    ╚═════╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝╚═╝╚═╝  ╚═╝
     """)
     print("=" * 80 + "\n")
+    persistent_thread_id: Optional[str] = None
     while True:
-        main()
+        result_thread_id = main(persistent_thread_id)
+        if result_thread_id:
+            persistent_thread_id = result_thread_id
         if input("Do you want to continue using Genomix-Agent?(y/n)\n").strip().lower() != 'y':
             break
         print("\n" + "=" * 70)
-    
+
     print("👋 Thank you for using Genomix-Agent!")
 
 

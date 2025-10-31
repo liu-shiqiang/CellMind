@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigD
 from typing import Literal
 import logging
 import structlog
+from uuid import uuid4
 
 from langchain import hub
 from langgraph.prebuilt import create_react_agent
@@ -401,6 +402,18 @@ def _ensure_project_state(state: "AgentState") -> Dict[str, Any]:
     return project_state
 
 
+def _get_active_dataset_entry(
+    state: "AgentState",
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    project_state = state.get("project_state") or {}
+    datasets = project_state.get("datasets") or {}
+    dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset")
+    entry: Optional[Dict[str, Any]] = None
+    if dataset_id and isinstance(datasets.get(dataset_id), dict):
+        entry = datasets[dataset_id]
+    return dataset_id, entry
+
+
 def _ensure_dataset_entry(
     state: "AgentState", work_dir: Optional[str] = None, dataset_hint: Optional[str] = None
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -581,10 +594,7 @@ def _identify_tool_from_plan_step(step: str) -> Optional[str]:
 
 
 def _prune_completed_plan(state: "AgentState") -> None:
-    project_state = state.get("project_state") or {}
-    datasets = project_state.get("datasets") or {}
-    dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset")
-    dataset_entry = datasets.get(dataset_id) if dataset_id else None
+    dataset_id, dataset_entry = _get_active_dataset_entry(state)
 
     if not dataset_entry:
         return
@@ -1356,7 +1366,25 @@ async def general_executor(state: AgentState) -> AgentState:
         state["next_step"] = "response"
         return state
     current_step = plan[0]
-    
+
+    dataset_id, dataset_entry = _get_active_dataset_entry(state)
+    tool_name = _identify_tool_from_plan_step(str(current_step))
+    if tool_name and dataset_entry and _is_tool_already_completed(dataset_entry, tool_name):
+        logger.info(
+            "[General Executor] Skipping completed step '%s' for dataset '%s'", tool_name, dataset_id
+        )
+        observation = (
+            f"<observation>检测到步骤 '{tool_name}' 已在当前数据集上完成，本轮将自动跳过。</observation>"
+        )
+        state["messages"].append(AIMessage(content=observation))
+        state["plan"] = plan[1:]
+        if state["plan"]:
+            state["next_step"] = "general_executor"
+        else:
+            state["execution_status"] = "completed"
+            state["next_step"] = "response"
+        return state
+
     messages = state.get("messages", [])
 
     formatted_history = "\n"
@@ -1601,8 +1629,21 @@ Full Conversation History:
             observation_content = f"<observation>Replanner generated a new plan. Reasoning: {reasoning}\nNew Plan:\n{plan_summary}</observation>"
             state["messages"].append(AIMessage(content=observation_content))
             state["plan"] = new_plan
-            state["next_step"] = "general_executor"
-            state["execution_status"] = "in_progress"
+            _prune_completed_plan(state)
+            pruned_plan = state.get("plan", [])
+            if not pruned_plan:
+                state["messages"].append(
+                    AIMessage(
+                        content=(
+                            "<observation>检测到重规划后的所有步骤均已在当前数据集上完成，直接进入总结响应。</observation>"
+                        )
+                    )
+                )
+                state["execution_status"] = "completed"
+                state["next_step"] = "response"
+            else:
+                state["next_step"] = "general_executor"
+                state["execution_status"] = "in_progress"
             state["replan_attempts"] = 0
         elif action == "continue_plan":
             reasoning = decision_data.get("reasoning", "")
@@ -1649,7 +1690,7 @@ def route_after_replan(state: AgentState) -> str:
 def build_graph():
 
     g = StateGraph(AgentState)
-    
+
     g.add_node("intent_recognition", intent_recognition)
     g.add_node("response", response) # Note: Typo in function name 'response'
     g.add_node("general_planner", general_planner)
@@ -1696,46 +1737,47 @@ def build_graph():
         }
     )
     g.add_edge("response", END)
-    
+
     return g.compile(checkpointer=memory)
 
 
-async def run_objective(objective: str, input_files: Optional[List[str]] = None):
-    """运行通用智能体"""
-    logger.info(f"[Agent] 开始执行任务: {objective}")
-    if input_files:
-        logger.info(f"[Agent] 输入文件: {input_files}")
-    
-
-    thread_id = "1"
-    memory_context = conversation_memory.load_context(thread_id=thread_id, objective=objective)
+def create_initial_state(
+    objective: str, input_files: Optional[List[str]], thread_id: Optional[str]
+) -> Tuple[AgentState, str]:
+    resolved_thread_id = (thread_id or str(uuid4())).strip() or str(uuid4())
+    memory_context = conversation_memory.load_context(
+        thread_id=resolved_thread_id, objective=objective
+    )
     memory_messages = conversation_memory.build_context_messages(memory_context)
-    project_state = json.loads(json.dumps(memory_context.project_state)) if memory_context.project_state else {}
+    project_state = (
+        json.loads(json.dumps(memory_context.project_state))
+        if memory_context.project_state
+        else {}
+    )
     project_message = build_project_state_message(project_state)
     if project_message:
         memory_messages.insert(0, SystemMessage(content=project_message))
 
-    initial_state = AgentState(
-        objective=objective,
-        messages=list(memory_messages),
-        input_files=input_files or [],
-        intents=[],
-        plan=[],
-        next_step=None,
-        memory_summary=memory_context.summary,
-        memory_records=[record.__dict__ for record in memory_context.records],
-        thread_id=thread_id,
-        replan_attempts=0,
-        max_replan_attempts=4,
-        execution_status="in_progress",
-        intent_trace={},
-        work_dir=None,
-        tool_history=[],
-        analysis_notes={},
-        recognized_intents=[],
-        project_state=project_state,
-
-    )
+    state: AgentState = {
+        "objective": objective,
+        "messages": list(memory_messages),
+        "input_files": input_files or [],
+        "intents": [],
+        "plan": [],
+        "next_step": None,
+        "memory_summary": memory_context.summary,
+        "memory_records": [record.__dict__ for record in memory_context.records],
+        "thread_id": resolved_thread_id,
+        "replan_attempts": 0,
+        "max_replan_attempts": 4,
+        "execution_status": "in_progress",
+        "intent_trace": {},
+        "work_dir": None,
+        "tool_history": [],
+        "analysis_notes": {},
+        "recognized_intents": [],
+        "project_state": project_state,
+    }
 
     if project_state:
         datasets = project_state.get("datasets", {})
@@ -1744,11 +1786,25 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
             active_entry = datasets[active_dataset]
             work_dir = active_entry.get("work_dir")
             if work_dir:
-                initial_state["work_dir"] = work_dir
+                state["work_dir"] = work_dir
             saved_inputs = active_entry.get("input_files")
-            if saved_inputs and not initial_state["input_files"]:
+            if saved_inputs and not state["input_files"]:
                 if isinstance(saved_inputs, list):
-                    initial_state["input_files"] = list(saved_inputs)
+                    state["input_files"] = list(saved_inputs)
+
+    return state, resolved_thread_id
+
+
+async def run_objective(
+    objective: str, input_files: Optional[List[str]] = None, thread_id: Optional[str] = None
+):
+    """运行通用智能体"""
+    logger.info(f"[Agent] 开始执行任务: {objective}")
+    if input_files:
+        logger.info(f"[Agent] 输入文件: {input_files}")
+
+
+    initial_state, resolved_thread_id = create_initial_state(objective, input_files, thread_id)
 
     graph = build_graph()
     final_output: Optional[Any] = None
@@ -1756,7 +1812,7 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
 
     async for event in graph.astream(
         initial_state,
-        config={"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
+        config={"recursion_limit": 50, "configurable": {"thread_id": resolved_thread_id}}
     ):
         should_break = False
         for k, v in event.items():
@@ -1787,7 +1843,7 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
             result_text = str(final_output) if final_output is not None else None
 
         conversation_memory.store_conversation(
-            thread_id=thread_id,
+            thread_id=resolved_thread_id,
             objective=objective,
             messages=messages,
             result_text=result_text,
