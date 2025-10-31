@@ -4,7 +4,12 @@ pytest.importorskip("langchain_core", reason="LangChain core library not availab
 
 from langchain_core.messages import HumanMessage
 
-from src.agent.agent_new import Intent, response
+from src.agent.agent_new import (
+    Intent,
+    build_project_state_message,
+    response,
+    _prune_completed_plan,
+)
 
 
 @pytest.mark.asyncio
@@ -42,6 +47,7 @@ async def test_memory_query_short_circuits_to_memory_response():
                 justification="Detected memory retrieval phrasing in the request.",
             ).model_dump()
         ],
+        "project_state": {},
     }
 
     updated_state = await response(state)  # type: ignore[arg-type]
@@ -100,6 +106,7 @@ async def test_status_check_reports_progress_details():
                 justification="Detected progress inquiry phrasing in the request.",
             ).model_dump()
         ],
+        "project_state": {},
     }
 
     updated_state = await response(state)  # type: ignore[arg-type]
@@ -112,3 +119,46 @@ async def test_status_check_reports_progress_details():
     assert "正在重新准备聚类输入" in final_message
     assert "last_rag" not in updated_state["analysis_notes"]
     assert updated_state["next_step"] == "end"
+
+
+def test_prune_completed_plan_removes_finished_steps():
+    state = {
+        "plan": [
+            "Use the 'load_h5ad_data' tool to preprocess the dataset",
+            "Run the 'run_ssgsea_enrichment' tool to compute functional enrichment",
+        ],
+        "project_state": {
+            "active_dataset": "sample",
+            "datasets": {
+                "sample": {
+                    "work_dir": "/tmp/sample",
+                    "completed_steps": ["load_h5ad_data"],
+                    "preprocessed_path": "/tmp/sample/sample_preprocessed.h5ad",
+                }
+            },
+        },
+    }
+
+    _prune_completed_plan(state)  # type: ignore[arg-type]
+
+    assert len(state["plan"]) == 1
+    assert "run_ssgsea_enrichment" in state["plan"][0]
+
+
+def test_build_project_state_message_includes_completed_steps():
+    project_state = {
+        "active_dataset": "sample",
+        "datasets": {
+            "sample": {
+                "work_dir": "/tmp/sample",
+                "completed_steps": ["load_h5ad_data", "cluster_and_diff"],
+                "embeddings_path": "/tmp/sample/sample_emb.h5ad",
+            }
+        },
+    }
+
+    message = build_project_state_message(project_state)
+    assert message is not None
+    assert "加载与预处理数据" in message
+    assert "/tmp/sample" in message
+    assert "sample_emb.h5ad" in message
