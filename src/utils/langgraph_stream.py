@@ -8,7 +8,14 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from src.agent.agent_new import AgentState, build_graph, conversation_memory
+from src.agent.agent_new import (
+    AgentState,
+    build_graph,
+    build_project_state_message,
+    conversation_memory,
+    create_initial_state,
+    serialise_project_state,
+)
 
 EventHandler = Callable[[Dict[str, Any]], Awaitable[None]]
 
@@ -86,33 +93,6 @@ def _fingerprint(value: Any) -> str:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, default=_plan_default)
     except TypeError:
         return str(value)
-
-
-def create_initial_state(
-    objective: str,
-    input_files: Optional[List[str]],
-    thread_id: Optional[str],
-) -> Tuple[AgentState, str]:
-    resolved_thread_id = (thread_id or str(uuid4())).strip() or str(uuid4())
-    memory_context = conversation_memory.load_context(thread_id=resolved_thread_id, objective=objective)
-    memory_messages = conversation_memory.build_context_messages(memory_context)
-
-    state: AgentState = {
-        "objective": objective,
-        "messages": list(memory_messages),
-        "input_files": input_files or [],
-        "intents": [],
-        "plan": [],
-        "next_step": None,
-        "memory_summary": memory_context.summary,
-        "memory_records": [record.__dict__ for record in memory_context.records],
-        "thread_id": resolved_thread_id,
-        "replan_attempts": 0,
-        "max_replan_attempts": 4,
-        "execution_status": "in_progress",
-        "intent_trace": {},
-    }
-    return state, resolved_thread_id
 
 
 def _extract_final_ai_message(messages: Iterable[BaseMessage]) -> Optional[BaseMessage]:
@@ -254,7 +234,10 @@ def _store_conversation(
         objective=objective,
         messages=messages,
         result_text=result_text,
-        metadata={"input_files": input_files or []},
+        metadata={
+            "input_files": input_files or [],
+            "project_state": serialise_project_state(final_state.get("project_state", {})),
+        },
     )
 
 

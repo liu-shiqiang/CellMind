@@ -54,6 +54,7 @@ class MemoryContext:
 
     summary: str = ""
     records: List[MemoryRecord] = field(default_factory=list)
+    project_state: Dict[str, Any] = field(default_factory=dict)
 
 
 class ConversationMemoryStore:
@@ -84,12 +85,15 @@ class ConversationMemoryStore:
     def load_context(self, thread_id: str, objective: str) -> MemoryContext:
         """Load the long-term memory context for a thread/objective pair."""
 
-        thread_data = self._data["threads"].get(thread_id, {"history": [], "thread_summary": ""})
+        thread_data = self._data["threads"].get(
+            thread_id, {"history": [], "thread_summary": "", "project_state": {}}
+        )
         summary = thread_data.get("thread_summary", "")
         history: List[Dict[str, Any]] = thread_data.get("history", [])
         relevant = self._retrieve_relevant(history, objective, self._retrieval_top_k)
         records = [self._dict_to_record(item) for item in relevant]
-        return MemoryContext(summary=summary, records=records)
+        project_state = dict(thread_data.get("project_state", {}))
+        return MemoryContext(summary=summary, records=records, project_state=project_state)
 
     def build_context_messages(self, context: MemoryContext) -> List[SystemMessage]:
         """Create system messages that expose memory context to the agent."""
@@ -141,9 +145,12 @@ class ConversationMemoryStore:
             metadata=metadata or {},
         )
 
+        metadata = metadata or {}
+
         with self._lock:
             thread_data = self._data["threads"].setdefault(
-                thread_id, {"history": [], "thread_summary": ""}
+                thread_id,
+                {"history": [], "thread_summary": "", "project_state": {}},
             )
             thread_data["history"].append(self._record_to_dict(record))
             if summary_addition:
@@ -153,9 +160,43 @@ class ConversationMemoryStore:
             thread_data["thread_summary"] = self._trim_text(
                 thread_data.get("thread_summary", ""), self._thread_summary_max_chars
             )
+
+            project_state_update = metadata.get("project_state")
+            if project_state_update:
+                merged = self._merge_project_state(
+                    thread_data.get("project_state", {}), project_state_update
+                )
+                thread_data["project_state"] = merged
+
             self._save()
 
         return record
+
+    # ------------------------------------------------------------------
+    # Project state helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _merge_project_state(
+        existing: Dict[str, Any], update: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Merge two nested dictionaries describing project artefacts."""
+
+        if not existing:
+            existing = {}
+
+        merged = json.loads(json.dumps(existing)) if existing else {}
+
+        def _deep_merge(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+            for key, value in source.items():
+                if isinstance(value, dict) and isinstance(target.get(key), dict):
+                    target[key] = _deep_merge(dict(target[key]), value)
+                else:
+                    target[key] = value
+            return target
+
+        if update:
+            merged = _deep_merge(dict(merged), update)
+        return merged
 
     # ------------------------------------------------------------------
     # Internal helpers
