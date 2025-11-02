@@ -22,6 +22,7 @@ class LLMManager:
     def __init__(self):
         self._llm_instances: Dict[str, BaseLanguageModel] = {}
         self._default_model = settings.LLM_MODEL
+        self._tool_model = getattr(settings, "LLM_TOOL_MODEL", None)
         self._base_url = settings.LLM_BASE_URL
         self._temperature = settings.LLM_TEMPERATURE
         
@@ -49,7 +50,8 @@ class LLMManager:
         Returns:
             工具调用LLM实例
         """
-        return self.get_llm(settings.LLM_TOOL_MODEL)
+        tool_model = self._tool_model or self._default_model
+        return self.get_llm(tool_model)
     
     def _create_llm(self, model_name: str) -> BaseLanguageModel:
         """

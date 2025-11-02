@@ -1,11 +1,13 @@
 import re
 import json
+from pathlib import Path
 from typing import Annotated, List, Tuple, Union, Dict, Any, Optional
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Literal
 import logging
 import structlog
+from uuid import uuid4
 
 from langchain import hub
 from langgraph.prebuilt import create_react_agent
@@ -87,6 +89,17 @@ DEFAULT_INTENT_DESCRIPTIONS: Dict[str, str] = {
     "clarification": "Ask clarifying questions to better understand the request.",
     "greeting": "Handle conversational greetings without analysis.",
     "chitchat": "Engage in small talk without triggering tools.",
+}
+
+TOOL_STEP_LABELS: Dict[str, str] = {
+    "load_h5ad_data": "加载与预处理数据",
+    "extract_embeddings_with_scgpt": "提取 scGPT 嵌入",
+    "cluster_and_diff": "聚类与差异分析",
+    "annotate_with_markers": "细胞类型注释",
+    "interpret_cluster_results": "聚类功能解读",
+    "interpret_celltype_results": "细胞类型叙述生成",
+    "run_ssgsea_enrichment": "ssGSEA 富集分析",
+    "dataset_bio_qa": "知识库问答总结",
 }
 
 
@@ -244,6 +257,7 @@ def _apply_intent_result(
         result.is_task = False
 
     state["intents"] = task_intents if result.is_task else []
+    state["recognized_intents"] = [intent.model_dump() for intent in result.intents]
     state["next_step"] = "planner" if result.is_task else "response"
     trace_payload = {
         "objective": state.get("objective"),
@@ -258,6 +272,116 @@ def _apply_intent_result(
     logger.info("[Intent Recognition] Final decision: %s", trace_payload)
 
 
+def _get_recognized_intent_labels(state: "AgentState") -> List[str]:
+    """Return the normalized intent labels detected for the current turn."""
+
+    raw_intents = state.get("recognized_intents", []) or []
+    labels: List[str] = []
+
+    for item in raw_intents:
+        if isinstance(item, Intent):
+            labels.append(item.intent)
+        elif isinstance(item, dict):
+            labels.append(_normalize_intent_label(item.get("intent")))
+        elif hasattr(item, "intent"):
+            labels.append(_normalize_intent_label(getattr(item, "intent", "")))
+
+    return labels
+
+
+def _format_memory_response(state: "AgentState") -> str:
+    """Build a conversational reply describing the stored long-term memory."""
+
+    summary = (state.get("memory_summary") or "").strip()
+    records = state.get("memory_records") or []
+
+    if not summary and not records:
+        return (
+            "当前会话没有可供检索的长期记忆记录。如需我在未来记住关键信息，"
+            "请明确告知我哪些结论或文件需要保存。"
+        )
+
+    lines: List[str] = ["### 长期记忆检索结果"]
+
+    if summary:
+        lines.append("")
+        lines.append("**会话摘要**")
+        lines.append(summary)
+
+    if records:
+        lines.append("")
+        lines.append("**历史任务记录**")
+        for idx, record in enumerate(records, 1):
+            if isinstance(record, dict):
+                record_dict = record
+            else:
+                record_dict = getattr(record, "__dict__", {})
+
+            objective = record_dict.get("objective") or "（未记录目标）"
+            created_at = record_dict.get("created_at") or "时间未知"
+            record_summary = record_dict.get("summary") or ""
+            highlights = record_dict.get("highlights") or ""
+
+            lines.append(f"{idx}. {objective}（{created_at}）")
+            if record_summary:
+                lines.append(f"   - 摘要：{record_summary}")
+            if highlights:
+                lines.append(f"   - 重点：{highlights}")
+
+    return "\n".join(lines).strip()
+
+
+def _format_status_response(state: "AgentState") -> str:
+    """Render a structured status update for project progress inquiries."""
+
+    status_text = (state.get("execution_status") or "未开始").strip() or "未开始"
+    lines: List[str] = ["### 项目状态更新", f"- 当前执行状态：{status_text}"]
+
+    remaining_plan = [step for step in state.get("plan", []) if isinstance(step, str) and step.strip()]
+    if remaining_plan:
+        lines.append("- 待执行步骤：")
+        for idx, step in enumerate(remaining_plan, 1):
+            lines.append(f"  {idx}. {step.strip()}")
+
+    tool_history = state.get("tool_history") or []
+    if tool_history:
+        lines.append("- 最近的工具调用：")
+        for entry in tool_history[-3:]:
+            description_parts: List[str] = []
+            tool_name = ""
+            if isinstance(entry, dict):
+                tool_name = entry.get("tool") or entry.get("tool_name") or "未知工具"
+                outcome = entry.get("status") or entry.get("result_status") or entry.get("outcome")
+                if outcome:
+                    description_parts.append(str(outcome))
+                error = entry.get("error") or entry.get("message")
+                if error:
+                    description_parts.append(str(error))
+            else:
+                tool_name = str(getattr(entry, "tool", getattr(entry, "tool_name", "未知工具")))
+            detail = "；".join(part for part in description_parts if part)
+            if detail:
+                lines.append(f"  • {tool_name}：{detail}")
+            else:
+                lines.append(f"  • {tool_name}")
+
+    analysis_notes = state.get("analysis_notes") or {}
+    completed_steps = analysis_notes.get("completed_steps")
+    if isinstance(completed_steps, list) and completed_steps:
+        lines.append("- 已完成步骤：")
+        for idx, step in enumerate(completed_steps, 1):
+            lines.append(f"  {idx}. {step}")
+
+    recent_note = analysis_notes.get("last_note")
+    if isinstance(recent_note, str) and recent_note.strip():
+        lines.append(f"- 最新备注：{recent_note.strip()}")
+
+    if len(lines) == 2:
+        lines.append("- 尚未记录详细的执行历史。")
+
+    return "\n".join(lines).strip()
+
+
 def _safe_json_loads(payload: Any) -> Optional[Dict[str, Any]]:
     """Best-effort JSON decoding utility used for tool outputs."""
 
@@ -270,6 +394,282 @@ def _safe_json_loads(payload: Any) -> Optional[Dict[str, Any]]:
             return None
         return parsed if isinstance(parsed, dict) else None
     return None
+
+
+def _ensure_project_state(state: "AgentState") -> Dict[str, Any]:
+    project_state = state.setdefault("project_state", {})
+    project_state.setdefault("datasets", {})
+    return project_state
+
+
+def _get_active_dataset_entry(
+    state: "AgentState",
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    project_state = state.get("project_state") or {}
+    datasets = project_state.get("datasets") or {}
+    dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset")
+    entry: Optional[Dict[str, Any]] = None
+    if dataset_id and isinstance(datasets.get(dataset_id), dict):
+        entry = datasets[dataset_id]
+    return dataset_id, entry
+
+
+def _ensure_dataset_entry(
+    state: "AgentState", work_dir: Optional[str] = None, dataset_hint: Optional[str] = None
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    project_state = _ensure_project_state(state)
+    datasets: Dict[str, Any] = project_state.setdefault("datasets", {})
+
+    dataset_id: Optional[str] = None
+    if work_dir:
+        dataset_id = Path(work_dir).name
+    elif dataset_hint:
+        dataset_id = dataset_hint
+    elif state.get("work_dir"):
+        dataset_id = Path(state["work_dir"]).name
+    else:
+        dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset")
+        if dataset_id is None and datasets:
+            dataset_id = next(iter(datasets))
+
+    if dataset_id is None and work_dir is None:
+        return None, None
+
+    if dataset_id is None and work_dir:
+        dataset_id = Path(work_dir).name
+
+    entry = datasets.setdefault(dataset_id, {})
+    entry.setdefault("completed_steps", [])
+
+    if work_dir:
+        entry["work_dir"] = work_dir
+        state["work_dir"] = work_dir
+
+    if entry.get("work_dir") and not state.get("work_dir"):
+        state["work_dir"] = entry["work_dir"]
+
+    project_state["active_dataset"] = dataset_id
+    project_state["last_dataset"] = dataset_id
+
+    return dataset_id, entry
+
+
+def _mark_completed(entry: Dict[str, Any], tool_name: str) -> None:
+    completed = entry.setdefault("completed_steps", [])
+    if tool_name not in completed:
+        completed.append(tool_name)
+
+
+def _update_project_state_from_tool(
+    state: "AgentState", tool_name: str, tool_args: Dict[str, Any], tool_result: Any
+) -> None:
+    payload = _safe_json_loads(tool_result)
+    project_state = _ensure_project_state(state)
+
+    work_dir = tool_args.get("work_dir") if isinstance(tool_args, dict) else None
+    dataset_hint = None
+
+    if isinstance(tool_args, dict):
+        input_file = tool_args.get("file_path") or tool_args.get("input_path")
+    else:
+        input_file = None
+
+    if payload and isinstance(payload, dict):
+        work_dir = payload.get("work_dir") or work_dir or payload.get("work_path")
+        dataset_hint = payload.get("dataset_id")
+
+    dataset_id, dataset_entry = _ensure_dataset_entry(state, work_dir, dataset_hint)
+    if dataset_entry is None:
+        return
+
+    if input_file:
+        dataset_entry.setdefault("input_files", set())
+        if isinstance(dataset_entry["input_files"], set):
+            dataset_entry["input_files"].add(str(input_file))
+        else:
+            files = set(dataset_entry.get("input_files", []))
+            files.add(str(input_file))
+            dataset_entry["input_files"] = files
+
+    if tool_name == "load_h5ad_data" and payload:
+        dataset_entry["preprocessed_path"] = payload.get("preproc_path") or dataset_entry.get("preprocessed_path")
+        if payload.get("work_dir"):
+            dataset_entry["work_dir"] = payload["work_dir"]
+            state["work_dir"] = payload["work_dir"]
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "extract_embeddings_with_scgpt" and payload:
+        dataset_entry["embeddings_path"] = payload.get("embeddings_path") or dataset_entry.get("embeddings_path")
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "cluster_and_diff" and payload:
+        dataset_entry["clustered_path"] = payload.get("clustered_path") or dataset_entry.get("clustered_path")
+        dataset_entry["diff_gene_path"] = payload.get("diff_gene_path") or dataset_entry.get("diff_gene_path")
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "annotate_with_markers" and payload:
+        dataset_entry["annotated_path"] = (
+            payload.get("annoted_Path")
+            or payload.get("annotated_path")
+            or dataset_entry.get("annotated_path")
+        )
+        dataset_entry.setdefault("annotation", {})
+        dataset_entry["annotation"].update(
+            {
+                "candidate_path": payload.get("anno_candidate"),
+                "result_path": payload.get("anno_result"),
+            }
+        )
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "interpret_cluster_results" and payload:
+        dataset_entry.setdefault("interpretation", {})
+        dataset_entry["interpretation"].update(payload)
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "interpret_celltype_results" and payload:
+        dataset_entry.setdefault("celltype_report", {})
+        dataset_entry["celltype_report"].update(payload)
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "run_ssgsea_enrichment" and payload:
+        enrichment = dataset_entry.setdefault("enrichment", {})
+        enrichment["ssgsea"] = payload
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "dataset_bio_qa" and payload:
+        dataset_entry.setdefault("qa", payload)
+
+    project_state.setdefault("datasets", {})[dataset_id] = dataset_entry
+
+    if isinstance(dataset_entry.get("input_files"), set):
+        dataset_entry["input_files"] = sorted(str(item) for item in dataset_entry["input_files"])
+
+    completed_notes = state.setdefault("analysis_notes", {}).setdefault("completed_steps", [])
+    human_label = TOOL_STEP_LABELS.get(tool_name, tool_name)
+    if human_label not in completed_notes:
+        completed_notes.append(human_label)
+
+
+def _is_tool_already_completed(dataset_entry: Dict[str, Any], tool_name: str) -> bool:
+    if not dataset_entry:
+        return False
+
+    if tool_name == "load_h5ad_data":
+        return bool(dataset_entry.get("preprocessed_path"))
+    if tool_name == "extract_embeddings_with_scgpt":
+        return bool(dataset_entry.get("embeddings_path"))
+    if tool_name == "cluster_and_diff":
+        return bool(dataset_entry.get("clustered_path") and dataset_entry.get("diff_gene_path"))
+    if tool_name == "annotate_with_markers":
+        return bool(
+            dataset_entry.get("annotated_path") or dataset_entry.get("annotation", {}).get("result_path")
+        )
+    if tool_name == "interpret_cluster_results":
+        interpretation = dataset_entry.get("interpretation", {})
+        return bool(interpretation.get("dataset_report") or interpretation.get("clusters"))
+    if tool_name == "interpret_celltype_results":
+        report = dataset_entry.get("celltype_report", {})
+        return bool(report.get("report_path") or report.get("celltype_context_path"))
+    if tool_name == "run_ssgsea_enrichment":
+        enrichment = dataset_entry.get("enrichment", {}).get("ssgsea", {})
+        return bool(enrichment.get("result_paths") or enrichment.get("status"))
+    return False
+
+
+def _identify_tool_from_plan_step(step: str) -> Optional[str]:
+    lowered = step.lower()
+    for tool_name in (
+        "load_h5ad_data",
+        "extract_embeddings_with_scgpt",
+        "cluster_and_diff",
+        "annotate_with_markers",
+        "interpret_cluster_results",
+        "interpret_celltype_results",
+        "run_ssgsea_enrichment",
+    ):
+        if tool_name in lowered:
+            return tool_name
+    return None
+
+
+def _prune_completed_plan(state: "AgentState") -> None:
+    dataset_id, dataset_entry = _get_active_dataset_entry(state)
+
+    if not dataset_entry:
+        return
+
+    plan = state.get("plan") or []
+    if not plan:
+        return
+
+    filtered_steps: List[str] = []
+    pruned = False
+    for step in plan:
+        if not isinstance(step, str):
+            filtered_steps.append(step)
+            continue
+        tool_name = _identify_tool_from_plan_step(step)
+        if tool_name and _is_tool_already_completed(dataset_entry, tool_name):
+            logger.info(
+                "[General Planner] Skipping completed step '%s' for dataset '%s'",
+                tool_name,
+                dataset_id,
+            )
+            pruned = True
+            continue
+        filtered_steps.append(step)
+
+    if pruned:
+        state["plan"] = filtered_steps
+
+
+def build_project_state_message(project_state: Dict[str, Any]) -> Optional[str]:
+    if not project_state:
+        return None
+
+    datasets = project_state.get("datasets") or {}
+    if not datasets:
+        return None
+
+    active_dataset = project_state.get("active_dataset") or project_state.get("last_dataset")
+    lines = ["### 已保存的项目状态"]
+
+    for dataset_id, entry in datasets.items():
+        prefix = "(当前) " if active_dataset and dataset_id == active_dataset else ""
+        line = f"- {prefix}数据集 `{dataset_id}`"
+        work_dir = entry.get("work_dir")
+        if work_dir:
+            line += f"，工作目录：`{work_dir}`"
+        lines.append(line)
+
+        completed = entry.get("completed_steps") or []
+        if completed:
+            human_steps = ", ".join(TOOL_STEP_LABELS.get(step, step) for step in completed)
+            lines.append(f"  • 已完成步骤：{human_steps}")
+
+        if entry.get("embeddings_path"):
+            lines.append(f"  • 嵌入文件：`{entry['embeddings_path']}`")
+        if entry.get("annotated_path"):
+            lines.append(f"  • 细胞注释：`{entry['annotated_path']}`")
+        enrichment = entry.get("enrichment", {}).get("ssgsea", {})
+        if enrichment.get("result_paths"):
+            lines.append("  • 已计算 ssGSEA 富集分析结果，可直接复用。")
+
+    return "\n".join(lines)
+
+
+def serialise_project_state(project_state: Dict[str, Any]) -> Dict[str, Any]:
+    def _convert(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: _convert(val) for key, val in value.items()}
+        if isinstance(value, list):
+            return [_convert(item) for item in value]
+        if isinstance(value, set):
+            return sorted(str(item) for item in value)
+        return value
+
+    return _convert(project_state or {})
 
 
 def _extract_latest_user_question(messages: List[BaseMessage], fallback: str = "") -> str:
@@ -554,6 +954,8 @@ class AgentState(TypedDict):
     work_dir: Optional[str]
     tool_history: List[Dict[str, Any]]
     analysis_notes: Dict[str, Any]
+    recognized_intents: NotRequired[List[Dict[str, Any]]]
+    project_state: Dict[str, Any]
 
 # User intent recognition
 async def intent_recognition(state: AgentState) -> AgentState:
@@ -639,8 +1041,14 @@ async def response(state: AgentState):
     final_message: Optional[str] = None
 
     try:
+        recognized_labels = _get_recognized_intent_labels(state)
         dataset_result = analysis_notes.get("dataset_bio_qa")
-        if dataset_result:
+
+        if "memory_query" in recognized_labels:
+            final_message = _format_memory_response(state)
+        elif "status_check" in recognized_labels:
+            final_message = _format_status_response(state)
+        elif dataset_result:
             work_dir = dataset_result.get("work_dir") or state.get("work_dir")
             final_message = _build_dataset_followup_message(dataset_result, work_dir)
         else:
@@ -779,6 +1187,21 @@ Please carefully review the feedback above and regenerate the plan, ensuring it 
                 if non_empty_steps:
                     plan_generation_success = True
                     state["plan"] = non_empty_steps
+                    _prune_completed_plan(state)
+                    current_plan = state.get("plan", [])
+                    if not current_plan:
+                        logger.info(
+                            "[General Planner] All proposed steps already completed; skipping execution."
+                        )
+                        state["messages"].append(
+                            AIMessage(
+                                content=(
+                                    "<PLAN_GENERATED>\n{\n  \"steps\": []\n}\n</PLAN_GENERATED>"
+                                )
+                            )
+                        )
+                        state["next_step"] = "response"
+                        return state
                     logger.info("[General Planner] Plan generated successfully.")
                     previous_errors_feedback = ""
                     break
@@ -818,8 +1241,9 @@ Please carefully review the feedback above and regenerate the plan, ensuring it 
                 feedback_msg += "An unexpected error occurred. Please try regenerating the plan, ensuring it's a valid JSON object."
             previous_errors_feedback = feedback_msg
 
-    if plan_generation_success and plan:
-        plan_json_str = plan.model_dump_json(indent = 2)
+    if plan_generation_success and state.get("plan"):
+        plan_model = Plan(steps=state["plan"])
+        plan_json_str = plan_model.model_dump_json(indent=2)
         plan_message_content = f"<PLAN_GENERATED>\n{plan_json_str}\n</PLAN_GENERATED>"
         state["messages"].append(AIMessage(content=plan_message_content))
         state["next_step"] = "general_executor"
@@ -879,6 +1303,8 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
                         state.setdefault("analysis_notes", {})["dataset_bio_qa"] = dataset_payload
                         if "work_dir" not in dataset_payload and state.get("work_dir"):
                             dataset_payload["work_dir"] = state.get("work_dir")
+
+                _update_project_state_from_tool(state, tool_name, tool_args, tool_result)
 
                 if isinstance(tool_result, (dict, list)):
                     tool_result_str = json.dumps(tool_result, ensure_ascii=False)
@@ -940,7 +1366,25 @@ async def general_executor(state: AgentState) -> AgentState:
         state["next_step"] = "response"
         return state
     current_step = plan[0]
-    
+
+    dataset_id, dataset_entry = _get_active_dataset_entry(state)
+    tool_name = _identify_tool_from_plan_step(str(current_step))
+    if tool_name and dataset_entry and _is_tool_already_completed(dataset_entry, tool_name):
+        logger.info(
+            "[General Executor] Skipping completed step '%s' for dataset '%s'", tool_name, dataset_id
+        )
+        observation = (
+            f"<observation>检测到步骤 '{tool_name}' 已在当前数据集上完成，本轮将自动跳过。</observation>"
+        )
+        state["messages"].append(AIMessage(content=observation))
+        state["plan"] = plan[1:]
+        if state["plan"]:
+            state["next_step"] = "general_executor"
+        else:
+            state["execution_status"] = "completed"
+            state["next_step"] = "response"
+        return state
+
     messages = state.get("messages", [])
 
     formatted_history = "\n"
@@ -1185,8 +1629,21 @@ Full Conversation History:
             observation_content = f"<observation>Replanner generated a new plan. Reasoning: {reasoning}\nNew Plan:\n{plan_summary}</observation>"
             state["messages"].append(AIMessage(content=observation_content))
             state["plan"] = new_plan
-            state["next_step"] = "general_executor"
-            state["execution_status"] = "in_progress"
+            _prune_completed_plan(state)
+            pruned_plan = state.get("plan", [])
+            if not pruned_plan:
+                state["messages"].append(
+                    AIMessage(
+                        content=(
+                            "<observation>检测到重规划后的所有步骤均已在当前数据集上完成，直接进入总结响应。</observation>"
+                        )
+                    )
+                )
+                state["execution_status"] = "completed"
+                state["next_step"] = "response"
+            else:
+                state["next_step"] = "general_executor"
+                state["execution_status"] = "in_progress"
             state["replan_attempts"] = 0
         elif action == "continue_plan":
             reasoning = decision_data.get("reasoning", "")
@@ -1233,7 +1690,7 @@ def route_after_replan(state: AgentState) -> str:
 def build_graph():
 
     g = StateGraph(AgentState)
-    
+
     g.add_node("intent_recognition", intent_recognition)
     g.add_node("response", response) # Note: Typo in function name 'response'
     g.add_node("general_planner", general_planner)
@@ -1280,40 +1737,74 @@ def build_graph():
         }
     )
     g.add_edge("response", END)
-    
+
     return g.compile(checkpointer=memory)
 
 
-async def run_objective(objective: str, input_files: Optional[List[str]] = None):
+def create_initial_state(
+    objective: str, input_files: Optional[List[str]], thread_id: Optional[str]
+) -> Tuple[AgentState, str]:
+    resolved_thread_id = (thread_id or str(uuid4())).strip() or str(uuid4())
+    memory_context = conversation_memory.load_context(
+        thread_id=resolved_thread_id, objective=objective
+    )
+    memory_messages = conversation_memory.build_context_messages(memory_context)
+    project_state = (
+        json.loads(json.dumps(memory_context.project_state))
+        if memory_context.project_state
+        else {}
+    )
+    project_message = build_project_state_message(project_state)
+    if project_message:
+        memory_messages.insert(0, SystemMessage(content=project_message))
+
+    state: AgentState = {
+        "objective": objective,
+        "messages": list(memory_messages),
+        "input_files": input_files or [],
+        "intents": [],
+        "plan": [],
+        "next_step": None,
+        "memory_summary": memory_context.summary,
+        "memory_records": [record.__dict__ for record in memory_context.records],
+        "thread_id": resolved_thread_id,
+        "replan_attempts": 0,
+        "max_replan_attempts": 4,
+        "execution_status": "in_progress",
+        "intent_trace": {},
+        "work_dir": None,
+        "tool_history": [],
+        "analysis_notes": {},
+        "recognized_intents": [],
+        "project_state": project_state,
+    }
+
+    if project_state:
+        datasets = project_state.get("datasets", {})
+        active_dataset = project_state.get("active_dataset") or project_state.get("last_dataset")
+        if active_dataset and isinstance(datasets.get(active_dataset), dict):
+            active_entry = datasets[active_dataset]
+            work_dir = active_entry.get("work_dir")
+            if work_dir:
+                state["work_dir"] = work_dir
+            saved_inputs = active_entry.get("input_files")
+            if saved_inputs and not state["input_files"]:
+                if isinstance(saved_inputs, list):
+                    state["input_files"] = list(saved_inputs)
+
+    return state, resolved_thread_id
+
+
+async def run_objective(
+    objective: str, input_files: Optional[List[str]] = None, thread_id: Optional[str] = None
+):
     """运行通用智能体"""
     logger.info(f"[Agent] 开始执行任务: {objective}")
     if input_files:
         logger.info(f"[Agent] 输入文件: {input_files}")
-    
 
-    thread_id = "1"
-    memory_context = conversation_memory.load_context(thread_id=thread_id, objective=objective)
-    memory_messages = conversation_memory.build_context_messages(memory_context)
 
-    initial_state = AgentState(
-        objective=objective,
-        messages=list(memory_messages),
-        input_files=input_files or [],
-        intents=[],
-        plan=[],
-        next_step=None,
-        memory_summary=memory_context.summary,
-        memory_records=[record.__dict__ for record in memory_context.records],
-        thread_id=thread_id,
-        replan_attempts=0,
-        max_replan_attempts=4,
-        execution_status="in_progress",
-        intent_trace={},
-        work_dir=None,
-        tool_history=[],
-        analysis_notes={},
-
-    )
+    initial_state, resolved_thread_id = create_initial_state(objective, input_files, thread_id)
 
     graph = build_graph()
     final_output: Optional[Any] = None
@@ -1321,7 +1812,7 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
 
     async for event in graph.astream(
         initial_state,
-        config={"recursion_limit": 50, "configurable": {"thread_id": thread_id}}
+        config={"recursion_limit": 50, "configurable": {"thread_id": resolved_thread_id}}
     ):
         should_break = False
         for k, v in event.items():
@@ -1352,11 +1843,14 @@ async def run_objective(objective: str, input_files: Optional[List[str]] = None)
             result_text = str(final_output) if final_output is not None else None
 
         conversation_memory.store_conversation(
-            thread_id=thread_id,
+            thread_id=resolved_thread_id,
             objective=objective,
             messages=messages,
             result_text=result_text,
-            metadata={"input_files": input_files or []},
+            metadata={
+                "input_files": input_files or [],
+                "project_state": serialise_project_state(final_state.get("project_state", {})),
+            },
         )
 
     if isinstance(final_output, BaseMessage):
