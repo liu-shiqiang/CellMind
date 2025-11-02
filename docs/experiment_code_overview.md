@@ -34,17 +34,21 @@ src/experiments/
 `ExperimentSuite` 将实验拆分为独立函数，分别控制规划消融、重规划器故障注入、记忆开关、知识检索开关等变量。每个实验返回结构化的 `WorkflowRun` 列表，便于统一聚合与可视化。
 
 ### 2.4 图表与表格输出
-`_generate_outputs` 方法集中生成论文所需的图表（图 3A–3F）以及综合指标表（表 2），所有文件默认写入 `results/figures/` 与 `results/table_2_metrics.csv`。
+`_generate_outputs` 方法集中生成论文所需的图表（图 3A–3F）以及综合指标表（表 2），所有文件默认写入 `results/figures/` 与 `results/table_2_metrics.csv`。当某个实验缺乏有效数据时会自动跳过图表生成并在日志中给出原因提示，避免出现空白图像。
+
+### 2.5 可观测性与失败诊断
+`SingleCellAnalysisPipeline` 的每次工具调用都会记录耗时、参数与错误信息，`ExperimentSuite` 在执行结束后会生成 `failure_report.json`，汇总所有失败运行的任务、实验分支以及对应的工具错误，方便研究人员快速定位问题。CLI 支持通过 `--log-level` 参数调整输出等级（默认为 `INFO`），日志格式统一为 `[时间戳] 级别 模块: 消息`，也会在出现工具异常时打印堆栈信息。
 
 ## 3. 使用指南
 
 1. 在本地准备 `.h5ad` 数据集后执行：
    ```bash
-   python -m src.experiments.runner --dataset /path/to/sample.h5ad --output-dir results --runs-per-task 20
+   python -m src.experiments.runner --dataset /path/to/sample.h5ad --output-dir results --runs-per-task 20 --log-level INFO
    ```
 2. 运行结束后，`results/` 目录包含：
    - `figures/figure_3A_*` 等图像文件；
    - `table_2_metrics.csv` 综合指标；
+   - `failure_report.json`（若存在失败运行）；
    - `conversation_memory.json` 长期记忆快照。
 3. 若需调整任务或指标，可修改 `tasks.py` 中的任务生成逻辑，或在 `metrics.py`/`visualization.py` 中添加新的统计与图表函数。
 

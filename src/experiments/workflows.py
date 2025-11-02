@@ -209,7 +209,7 @@ class MultiAgentWorkflow(BaseWorkflow):
                 memory_recall = 1.0 if success else 0.4
 
         if task.requires_retrieval or "dataset_bio_qa" in task.intents:
-            qa_calls = [call for call in tool_calls if call.name == "dataset_bio_qa"]
+            qa_calls = [call for call in tool_calls if call.name == "dataset_bio_qa" and call.success]
             if qa_calls:
                 knowledge_accuracy = min(1.0, 0.6 + 0.1 * len(qa_calls))
 

@@ -1,6 +1,8 @@
 """Entry point orchestrating all experiments and generating outputs."""
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -27,6 +29,9 @@ from src.experiments.visualization import (
 )
 from src.experiments.workflows import MultiAgentWorkflow, SingleAgentWorkflow, WorkflowRun
 from src.memory.conversation_memory import ConversationMemoryStore
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -75,12 +80,14 @@ class ExperimentSuite:
         self.runs_per_task = max(1, runs_per_task)
         self.random_state = np.random.default_rng(random_seed)
         self.memory_store = ConversationMemoryStore(self.output_dir / "conversation_memory.json")
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.task_suites: Dict[str, List[TaskDefinition]] = {
             dataset.name: build_task_suite(dataset) for dataset in self.datasets
         }
 
     # ------------------------------------------------------------------
     def run(self) -> ExperimentOutputs:
+        self.logger.info("Starting experiment suite for %d dataset(s)", len(self.datasets))
         exp1 = self._run_experiment_1()
         exp2 = self._run_experiment_2()
         exp3 = self._run_experiment_3()
@@ -105,6 +112,7 @@ class ExperimentSuite:
 
     # Experiment 1 -----------------------------------------------------
     def _run_experiment_1(self) -> Dict[str, List[WorkflowRun]]:
+        self.logger.info("Experiment 1: 多智能体 vs 基线")
         pipeline_multi = self._create_pipeline()
         pipeline_baseline = self._create_pipeline()
         multi_agent = MultiAgentWorkflow(pipeline_multi, enable_memory=True, enable_replanner=True)
@@ -125,6 +133,7 @@ class ExperimentSuite:
 
     # Experiment 2 -----------------------------------------------------
     def _run_experiment_2(self) -> Dict[str, List[WorkflowRun]]:
+        self.logger.info("Experiment 2: 规划器消融")
         class NoPlannerWorkflow(MultiAgentWorkflow):
             def build_plan(self, task: TaskDefinition) -> List[str]:
                 return ["直接执行"]
@@ -152,6 +161,7 @@ class ExperimentSuite:
 
     # Experiment 3 -----------------------------------------------------
     def _run_experiment_3(self) -> Dict[str, List[WorkflowRun]]:
+        self.logger.info("Experiment 3: 重规划器鲁棒性")
         pipeline_with_replanner = self._create_pipeline(failure_rate=0.3)
         pipeline_without_replanner = self._create_pipeline(failure_rate=0.3)
         replanner_workflow = MultiAgentWorkflow(pipeline_with_replanner, enable_memory=True, enable_replanner=True)
@@ -172,6 +182,7 @@ class ExperimentSuite:
 
     # Experiment 4 -----------------------------------------------------
     def _run_experiment_4(self) -> Dict[str, List[WorkflowRun]]:
+        self.logger.info("Experiment 4: 长期记忆贡献")
         pipeline_memory = self._create_pipeline()
         pipeline_no_memory = self._create_pipeline()
         workflow_memory = MultiAgentWorkflow(pipeline_memory, enable_memory=True, enable_replanner=True)
@@ -192,6 +203,7 @@ class ExperimentSuite:
 
     # Experiment 5 -----------------------------------------------------
     def _run_experiment_5(self) -> Dict[str, List[WorkflowRun]]:
+        self.logger.info("Experiment 5: 知识检索贡献")
         pipeline_with_rag = self._create_pipeline()
         pipeline_without_rag = self._create_pipeline()
 
@@ -219,6 +231,7 @@ class ExperimentSuite:
 
     # Experiment 6 -----------------------------------------------------
     def _run_experiment_6(self) -> Dict[str, np.ndarray]:
+        self.logger.info("Experiment 6: 意图识别评估")
         classifier = RuleBasedIntentClassifier()
         classes = ["cell_annotation", "clustering_analysis", "pathway_analysis", "memory_query", "status_check", "dataset_bio_qa", "generic"]
         label_to_idx = {label: idx for idx, label in enumerate(classes)}
@@ -287,41 +300,60 @@ class ExperimentSuite:
         grouped_multi = summarise_by_dataset(exp1["multi_agent"])
         grouped_baseline = summarise_by_dataset(exp1["baseline"])
         labels = list(grouped_multi.keys())
-        metrics_multi = [grouped_multi[label] for label in labels]
-        metrics_baseline = [grouped_baseline.get(label, AggregateMetrics(label,0,0,0,0)) for label in labels]
+        if labels:
+            metrics_multi = [grouped_multi[label] for label in labels]
+            metrics_baseline = [grouped_baseline.get(label, AggregateMetrics(label, 0, 0, 0, 0)) for label in labels]
 
-        plot_grouped_bar(metrics_multi, metrics_baseline, labels, fig_dir / "figure_3A_success.png", "success_rate", "任务成功率", "图3A: 成功率对比")
-        plot_grouped_bar(metrics_multi, metrics_baseline, labels, fig_dir / "figure_3A_runtime.png", "avg_runtime", "平均运行时间 (秒)", "图3A: 运行时间对比")
-        plot_grouped_bar(metrics_multi, metrics_baseline, labels, fig_dir / "figure_3A_clarity.png", "avg_clarity", "平均清晰度评分", "图3A: 可理解性对比")
+            plot_grouped_bar(metrics_multi, metrics_baseline, labels, fig_dir / "figure_3A_success.png", "success_rate", "任务成功率", "图3A: 成功率对比")
+            plot_grouped_bar(metrics_multi, metrics_baseline, labels, fig_dir / "figure_3A_runtime.png", "avg_runtime", "平均运行时间 (秒)", "图3A: 运行时间对比")
+            plot_grouped_bar(metrics_multi, metrics_baseline, labels, fig_dir / "figure_3A_clarity.png", "avg_clarity", "平均清晰度评分", "图3A: 可理解性对比")
+        else:
+            self.logger.warning("Skipping 图3A 绘图：没有成功的实验1运行数据")
 
         # Experiment 2 violin plot
         plan_distances = [run.plan_edit_distance for run in exp2["planner"] if run.plan_edit_distance is not None]
         control_distances = [run.plan_edit_distance for run in exp2["no_planner"] if run.plan_edit_distance is not None]
-        plot_violin_steps(plan_distances + control_distances, ["启用计划"] * len(plan_distances) + ["禁用计划"] * len(control_distances), fig_dir / "figure_3B_violin.png")
+        if plan_distances or control_distances:
+            plot_violin_steps(
+                plan_distances + control_distances,
+                ["启用计划"] * len(plan_distances) + ["禁用计划"] * len(control_distances),
+                fig_dir / "figure_3B_violin.png",
+            )
+        else:
+            self.logger.warning("Skipping 图3B 小提琴图：缺少计划编辑距离数据")
 
         # Experiment 3 survival curve
         attempts = [max(1, run.plan_modifications + 1) for run in exp3["with_replanner"]]
         recoveries = [1 if run.recovered_from_failure else 0 for run in exp3["with_replanner"]]
-        plot_survival_curve(attempts, recoveries, fig_dir / "figure_3C_survival.png")
+        if attempts and recoveries:
+            plot_survival_curve(attempts, recoveries, fig_dir / "figure_3C_survival.png")
+        else:
+            self.logger.warning("Skipping 图3C 生存曲线：重规划实验没有数据")
 
         # Experiment 4 radar
-        memory_metrics = summarise_runs("memory", exp4["with_memory"])
-        no_memory_metrics = summarise_runs("no_memory", exp4["without_memory"])
-        radar_labels = ["记忆精确率", "记忆召回率", "满意度(清晰度)"]
-        radar_with = [memory_metrics.memory_precision, memory_metrics.memory_recall, memory_metrics.avg_clarity]
-        radar_without = [no_memory_metrics.memory_precision, no_memory_metrics.memory_recall, no_memory_metrics.avg_clarity]
-        plot_radar_chart(radar_labels, radar_with, radar_without, fig_dir / "figure_3D_radar.png", "图3D: 记忆贡献")
+        if exp4["with_memory"] and exp4["without_memory"]:
+            memory_metrics = summarise_runs("memory", exp4["with_memory"])
+            no_memory_metrics = summarise_runs("no_memory", exp4["without_memory"])
+            radar_labels = ["记忆精确率", "记忆召回率", "满意度(清晰度)"]
+            radar_with = [memory_metrics.memory_precision, memory_metrics.memory_recall, memory_metrics.avg_clarity]
+            radar_without = [no_memory_metrics.memory_precision, no_memory_metrics.memory_recall, no_memory_metrics.avg_clarity]
+            plot_radar_chart(radar_labels, radar_with, radar_without, fig_dir / "figure_3D_radar.png", "图3D: 记忆贡献")
+        else:
+            self.logger.warning("Skipping 图3D 雷达图：记忆实验没有可用数据")
 
         # Experiment 5 scatter
-        rag_metrics = summarise_runs("with_rag", exp5["with_rag"])
-        no_rag_metrics = summarise_runs("without_rag", exp5["without_rag"])
-        plot_accuracy_latency_scatter(
-            [rag_metrics.knowledge_accuracy, no_rag_metrics.knowledge_accuracy],
-            [rag_metrics.avg_runtime, no_rag_metrics.avg_runtime],
-            ["启用检索", "禁用检索"],
-            fig_dir / "figure_3E_scatter.png",
-            "图3E: 知识检索准确率与延迟",
-        )
+        if exp5["with_rag"] and exp5["without_rag"]:
+            rag_metrics = summarise_runs("with_rag", exp5["with_rag"])
+            no_rag_metrics = summarise_runs("without_rag", exp5["without_rag"])
+            plot_accuracy_latency_scatter(
+                [rag_metrics.knowledge_accuracy, no_rag_metrics.knowledge_accuracy],
+                [rag_metrics.avg_runtime, no_rag_metrics.avg_runtime],
+                ["启用检索", "禁用检索"],
+                fig_dir / "figure_3E_scatter.png",
+                "图3E: 知识检索准确率与延迟",
+            )
+        else:
+            self.logger.warning("Skipping 图3E 散点图：知识检索实验没有可用数据")
 
         # Experiment 6 confusion matrix
         matrix = exp6["confusion_matrix"]
@@ -337,6 +369,47 @@ class ExperimentSuite:
         table_rows.extend(build_table([summarise_runs("检索", exp5["with_rag"]), summarise_runs("无检索", exp5["without_rag"])]))
         export_table(table_rows, self.output_dir / "table_2_metrics.csv")
 
+        failure_entries: List[Dict[str, object]] = []
+        failure_entries.extend(self._collect_failures("experiment_1", exp1))
+        failure_entries.extend(self._collect_failures("experiment_2", exp2))
+        failure_entries.extend(self._collect_failures("experiment_3", exp3))
+        failure_entries.extend(self._collect_failures("experiment_4", exp4))
+        failure_entries.extend(self._collect_failures("experiment_5", exp5))
+
+        self._write_failure_report(failure_entries)
+
+    def _collect_failures(self, experiment: str, runs: Dict[str, List[WorkflowRun]]) -> List[Dict[str, object]]:
+        failures: List[Dict[str, object]] = []
+        for variant, variant_runs in runs.items():
+            for run in variant_runs:
+                if run.success:
+                    continue
+                failures.append(
+                    {
+                        "experiment": experiment,
+                        "variant": variant,
+                        "dataset": run.dataset.name,
+                        "task_id": run.task.task_id,
+                        "difficulty": run.task.difficulty,
+                        "failure_reason": run.failure_reason or "unknown",
+                        "tool_failures": [call.to_dict() for call in run.tool_calls if not call.success],
+                    }
+                )
+        return failures
+
+    def _write_failure_report(self, failures: List[Dict[str, object]]) -> None:
+        if not failures:
+            self.logger.info("所有运行均成功完成。")
+            return
+
+        failure_path = self.output_dir / "failure_report.json"
+        failure_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.logger.warning(
+            "检测到 %d 个失败运行，详细信息见 %s",
+            len(failures),
+            failure_path,
+        )
+
     # CLI --------------------------------------------------------------
 
 
@@ -345,7 +418,21 @@ def run_all_experiments(
     output_dir: str = "results",
     runs_per_task: int = 20,
     seed: Optional[int] = None,
+    log_level: str = "INFO",
 ) -> ExperimentOutputs:
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=level, format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+    else:
+        logging.getLogger().setLevel(level)
+
+    logger.info(
+        "运行实验套件: datasets=%s, output_dir=%s, runs_per_task=%s, seed=%s",
+        dataset_paths,
+        output_dir,
+        runs_per_task,
+        seed,
+    )
     datasets = iter_datasets(dataset_paths)
     suite = ExperimentSuite(datasets, output_dir=Path(output_dir), runs_per_task=runs_per_task, random_seed=seed)
     return suite.run()
@@ -356,8 +443,15 @@ def main(
     output_dir: str = typer.Option("results", help="实验结果输出目录"),
     runs_per_task: int = typer.Option(20, help="每个任务的运行次数"),
     seed: Optional[int] = typer.Option(None, help="随机种子"),
+    log_level: str = typer.Option("INFO", help="日志等级: DEBUG/INFO/WARNING/ERROR"),
 ) -> None:
-    run_all_experiments(dataset, output_dir=output_dir, runs_per_task=runs_per_task, seed=seed)
+    run_all_experiments(
+        dataset,
+        output_dir=output_dir,
+        runs_per_task=runs_per_task,
+        seed=seed,
+        log_level=log_level,
+    )
 
 
 if __name__ == "__main__":

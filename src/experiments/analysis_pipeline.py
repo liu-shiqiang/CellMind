@@ -2,17 +2,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
 from src.memory.conversation_memory import ConversationMemoryStore
 from src.tools.annotate_with_markers import annotate_with_markers
 from src.tools.cluster_diff import cluster_and_diff
-from src.tools.dataset_qa import retrieve_bio_context
+from src.tools.dataset_qa import dataset_bio_qa
 from src.tools.enrichment_analysis.ssgsea import run_ssgsea_enrichment
 from src.tools.extract_embeddings import extract_embeddings_with_scgpt
 from src.tools.load_h5ad import load_h5ad_data
@@ -27,6 +28,17 @@ class ToolCallRecord:
     success: bool
     error: Optional[str] = None
     metadata: Dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, object]:
+        """Serialise the record so it can be written to disk."""
+
+        return {
+            "name": self.name,
+            "duration": self.duration,
+            "success": self.success,
+            "error": self.error,
+            "metadata": {key: str(value) for key, value in self.metadata.items()},
+        }
 
 
 @dataclass
@@ -96,6 +108,7 @@ class SingleCellAnalysisPipeline:
         memory_store: Optional[ConversationMemoryStore] = None,
         failure_injector: Optional[ToolFailureInjector] = None,
     ) -> None:
+        self._logger = logging.getLogger(self.__class__.__name__)
         self._cache_enabled = cache_intermediate
         self._cache: Dict[Path, AnalysisArtifacts] = {}
         self._memory = memory_store
@@ -157,6 +170,12 @@ class SingleCellAnalysisPipeline:
                     )
         except Exception as exc:  # pragma: no cover - defensive guard
             failure_reason = str(exc)
+            self._logger.exception(
+                "Pipeline failure for dataset=%s intents=%s: %s",
+                artifacts.dataset_name,
+                list(intents),
+                failure_reason,
+            )
 
         success = failure_reason is None
 
@@ -171,6 +190,43 @@ class SingleCellAnalysisPipeline:
         )
 
     # ------------------------------------------------------------------
+    def _call_tool(
+        self,
+        name: str,
+        tool,
+        params: Dict[str, object],
+        tool_calls: List[ToolCallRecord],
+    ) -> Tuple[Any, float]:
+        """Invoke a LangChain tool while recording telemetry and failures."""
+
+        start = time.perf_counter()
+        try:
+            if hasattr(tool, "invoke"):
+                result = tool.invoke(params)
+            else:
+                result = tool(**params)
+        except Exception as exc:
+            duration = time.perf_counter() - start
+            tool_calls.append(
+                ToolCallRecord(
+                    name=name,
+                    duration=duration,
+                    success=False,
+                    error=str(exc),
+                    metadata={
+                        "params": json.dumps(
+                            {key: str(value) for key, value in params.items()},
+                            ensure_ascii=False,
+                        )
+                    },
+                )
+            )
+            self._logger.exception("Tool %s failed", name)
+            raise
+
+        duration = time.perf_counter() - start
+        return result, duration
+
     def _ensure_loaded(
         self,
         artifacts: AnalysisArtifacts,
@@ -180,15 +236,21 @@ class SingleCellAnalysisPipeline:
         if artifacts.work_dir and artifacts.preprocessed_path:
             return
 
-        start = time.perf_counter()
         work_dir_param = work_dir_override or Path("data/experiments") / artifacts.dataset_name
         work_dir_param.mkdir(parents=True, exist_ok=True)
 
         if self._injector.should_fail("load_h5ad_data"):
             raise RuntimeError("Injected failure in load_h5ad_data")
 
-        result = load_h5ad_data(file_path=str(artifacts.raw_path), output_dir=str(work_dir_param))
-        duration = time.perf_counter() - start
+        result, duration = self._call_tool(
+            "load_h5ad_data",
+            load_h5ad_data,
+            {
+                "file_path": str(artifacts.raw_path),
+                "output_dir": str(work_dir_param),
+            },
+            tool_calls,
+        )
         payload = json.loads(result)
         artifacts.work_dir = Path(payload["work_dir"]).expanduser().resolve()
         artifacts.preprocessed_path = Path(payload["preproc_path"]).expanduser().resolve()
@@ -208,15 +270,18 @@ class SingleCellAnalysisPipeline:
         if artifacts.preprocessed_path is None or artifacts.work_dir is None:
             raise RuntimeError("Attempted to compute embeddings before preprocessing.")
 
-        start = time.perf_counter()
         if self._injector.should_fail("extract_embeddings_with_scgpt"):
             raise RuntimeError("Injected failure in extract_embeddings_with_scgpt")
 
-        result = extract_embeddings_with_scgpt(
-            preproc_path=str(artifacts.preprocessed_path),
-            work_dir=str(artifacts.work_dir),
+        result, duration = self._call_tool(
+            "extract_embeddings_with_scgpt",
+            extract_embeddings_with_scgpt,
+            {
+                "preproc_path": str(artifacts.preprocessed_path),
+                "work_dir": str(artifacts.work_dir),
+            },
+            tool_calls,
         )
-        duration = time.perf_counter() - start
         payload = json.loads(result)
         artifacts.embedding_path = Path(payload["embeddings_path"]).expanduser().resolve()
         tool_calls.append(
@@ -234,15 +299,18 @@ class SingleCellAnalysisPipeline:
         if artifacts.embedding_path is None or artifacts.work_dir is None:
             raise RuntimeError("Attempted clustering before embeddings were created.")
 
-        start = time.perf_counter()
         if self._injector.should_fail("cluster_and_diff"):
             raise RuntimeError("Injected failure in cluster_and_diff")
 
-        result = cluster_and_diff(
-            embedding_path=str(artifacts.embedding_path),
-            work_dir=str(artifacts.work_dir),
+        result, duration = self._call_tool(
+            "cluster_and_diff",
+            cluster_and_diff,
+            {
+                "embedding_path": str(artifacts.embedding_path),
+                "work_dir": str(artifacts.work_dir),
+            },
+            tool_calls,
         )
-        duration = time.perf_counter() - start
         payload = json.loads(result)
         artifacts.clustered_path = Path(payload["clustered_path"]).expanduser().resolve()
         artifacts.diff_gene_path = Path(payload["diff_gene_path"]).expanduser().resolve()
@@ -264,16 +332,19 @@ class SingleCellAnalysisPipeline:
         if artifacts.clustered_path is None or artifacts.diff_gene_path is None:
             raise RuntimeError("Attempted annotation before clustering.")
 
-        start = time.perf_counter()
         if self._injector.should_fail("annotate_with_markers"):
             raise RuntimeError("Injected failure in annotate_with_markers")
 
-        result = annotate_with_markers(
-            clustered_path=str(artifacts.clustered_path),
-            diff_gene_path=str(artifacts.diff_gene_path),
-            work_dir=str(artifacts.work_dir),
+        result, duration = self._call_tool(
+            "annotate_with_markers",
+            annotate_with_markers,
+            {
+                "clustered_path": str(artifacts.clustered_path),
+                "diff_gene_path": str(artifacts.diff_gene_path),
+                "work_dir": str(artifacts.work_dir),
+            },
+            tool_calls,
         )
-        duration = time.perf_counter() - start
         payload = json.loads(result)
         artifacts.annotated_path = Path(payload["annoted_Path"]).expanduser().resolve()
         artifacts.annotation_summary = Path(payload["anno_result"]).expanduser().resolve()
@@ -295,16 +366,19 @@ class SingleCellAnalysisPipeline:
         if artifacts.annotated_path is None or artifacts.work_dir is None:
             raise RuntimeError("Attempted enrichment without annotations.")
 
-        start = time.perf_counter()
         if self._injector.should_fail("run_ssgsea_enrichment"):
             raise RuntimeError("Injected failure in run_ssgsea_enrichment")
 
-        msg = run_ssgsea_enrichment(
-            file_path=str(artifacts.annotated_path),
-            work_dir=str(artifacts.work_dir),
-            gene_set="KEGG",
+        msg, duration = self._call_tool(
+            "run_ssgsea_enrichment",
+            run_ssgsea_enrichment,
+            {
+                "file_path": str(artifacts.annotated_path),
+                "work_dir": str(artifacts.work_dir),
+                "gene_set": "KEGG",
+            },
+            tool_calls,
         )
-        duration = time.perf_counter() - start
         try:
             payload = json.loads(msg)
         except json.JSONDecodeError:
@@ -335,17 +409,31 @@ class SingleCellAnalysisPipeline:
         if artifacts.work_dir is None:
             raise RuntimeError("Knowledge retrieval requires a work directory.")
 
-        start = time.perf_counter()
         if self._injector.should_fail("dataset_bio_qa"):
             raise RuntimeError("Injected failure in dataset_bio_qa")
 
-        context_payload = retrieve_bio_context(
-            question=question,
-            work_dir=str(artifacts.work_dir),
-            top_k_local=3,
-            top_k_pubmed=3,
+        result, duration = self._call_tool(
+            "dataset_bio_qa",
+            dataset_bio_qa,
+            {
+                "question": question,
+                "work_dir": str(artifacts.work_dir),
+                "top_k_local": 3,
+                "top_k_pubmed": 3,
+            },
+            tool_calls,
         )
-        duration = time.perf_counter() - start
+        if isinstance(result, (bytes, bytearray)):
+            result = result.decode("utf-8")
+        if isinstance(result, str):
+            try:
+                context_payload = json.loads(result)
+            except json.JSONDecodeError:
+                context_payload = {"raw_response": result}
+        elif isinstance(result, dict):
+            context_payload = result
+        else:
+            context_payload = {"raw_response": str(result)}
         output_path = artifacts.work_dir / f"qa_context_{len(artifacts.qa_outputs)+1}.json"
         output_path.write_text(json.dumps(context_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         artifacts.qa_outputs.append(output_path)
