@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_categorical_dtype
 import scanpy as sc
 
 from src.scripts.interpretation_types import (
@@ -454,7 +455,15 @@ def _populate_cluster_metadata(
 
 
 def _collect_unique(series: pd.Series) -> Dict[str, int]:
-    counts = series.fillna("Unknown").astype(str).value_counts()
+    if is_categorical_dtype(series.dtype):
+        categorical = series.copy()
+        if "Unknown" not in categorical.cat.categories:
+            categorical = categorical.cat.add_categories(["Unknown"])
+        filled = categorical.fillna("Unknown")
+    else:
+        filled = series.fillna("Unknown")
+
+    counts = filled.astype(str).value_counts()
     return {str(index): int(value) for index, value in counts.items()}
 
 
