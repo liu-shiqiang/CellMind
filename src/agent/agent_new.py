@@ -1,5 +1,7 @@
 import re
 import json
+import random
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, List, Tuple, Union, Dict, Any, Optional
 from typing_extensions import NotRequired, TypedDict
@@ -25,7 +27,7 @@ from config.setting import settings
 from src.tools.dataset_qa import retrieve_bio_context
 from src.utils.llm_manager import get_llm_manager
 from src.utils.path_manager import path_manager, extract_paths_from_objective, validate_h5ad_file, create_analysis_work_dir
-from src.memory.conversation_memory import ConversationMemoryStore
+from src.memory.conversation_memory import ConversationMemoryStore, MemoryContext
 
 
 MEMORY_QUERY_PATTERNS = [
@@ -101,6 +103,90 @@ TOOL_STEP_LABELS: Dict[str, str] = {
     "run_ssgsea_enrichment": "ssGSEA 富集分析",
     "dataset_bio_qa": "知识库问答总结",
 }
+
+
+@dataclass
+class FailureInjectionConfig:
+    tool_names: List[str] = field(default_factory=lambda: ["load_h5ad_data"])
+    rate: float = 0.0
+    seed: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "tool_names": list(self.tool_names),
+            "rate": float(self.rate),
+            "seed": self.seed,
+        }
+
+
+@dataclass
+class AgentRuntimeConfig:
+    planner_mode: Literal["multi_agent", "linear", "disabled"] = "multi_agent"
+    enable_replanner: bool = True
+    enable_memory: bool = True
+    enable_rag: bool = True
+    enable_dataset_qa: bool = True
+    allow_tool_execution: bool = True
+    track_metrics: bool = True
+    max_replan_attempts: int = 4
+    failure_injection: Optional[FailureInjectionConfig] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "planner_mode": self.planner_mode,
+            "enable_replanner": self.enable_replanner,
+            "enable_memory": self.enable_memory,
+            "enable_rag": self.enable_rag,
+            "enable_dataset_qa": self.enable_dataset_qa,
+            "allow_tool_execution": self.allow_tool_execution,
+            "track_metrics": self.track_metrics,
+            "max_replan_attempts": self.max_replan_attempts,
+        }
+        if self.failure_injection is not None:
+            payload["failure_injection"] = self.failure_injection.to_dict()
+        return payload
+
+
+def _default_linear_plan(include_dataset_qa: bool = True) -> List[str]:
+    steps = [
+        "Use load_h5ad_data to preprocess the uploaded AnnData file.",
+        "Call extract_embeddings_with_scgpt to compute latent embeddings.",
+        "Execute cluster_and_diff for clustering and differential expression.",
+        "Invoke annotate_with_markers to label cell types.",
+        "Run interpret_cluster_results to summarise cluster-level findings.",
+        "Run interpret_celltype_results to build the cell-type narrative.",
+    ]
+    if include_dataset_qa:
+        steps.append("Leverage dataset_bio_qa for knowledge-base grounded reporting.")
+    steps.append("Run run_ssgsea_enrichment to compute pathway enrichment scores.")
+    return steps
+
+
+def _get_runtime_config(state: "AgentState") -> Dict[str, Any]:
+    return dict(state.get("runtime_config", {}) or {})
+
+
+def _config_flag(state: "AgentState", key: str, default: bool) -> bool:
+    config = _get_runtime_config(state)
+    return bool(config.get(key, default))
+
+
+def _config_value(state: "AgentState", key: str, default: Any) -> Any:
+    config = _get_runtime_config(state)
+    return config.get(key, default)
+
+
+def _ensure_replanner_route(state: "AgentState") -> None:
+    if _config_flag(state, "enable_replanner", True):
+        return
+    state["messages"].append(
+        AIMessage(
+            content="<REPLAN_SKIPPED>Intelligent replanner disabled by configuration. Returning response directly.</REPLAN_SKIPPED>"
+        )
+    )
+    state["next_step"] = "response"
+    if state.get("execution_status") != "completed":
+        state["execution_status"] = "failed"
 
 
 def _looks_like_memory_query(text: str) -> bool:
@@ -258,7 +344,12 @@ def _apply_intent_result(
 
     state["intents"] = task_intents if result.is_task else []
     state["recognized_intents"] = [intent.model_dump() for intent in result.intents]
-    state["next_step"] = "planner" if result.is_task else "response"
+
+    planner_mode = _config_value(state, "planner_mode", "multi_agent")
+    if not result.is_task or planner_mode == "disabled":
+        state["next_step"] = "response"
+    else:
+        state["next_step"] = "planner"
     trace_payload = {
         "objective": state.get("objective"),
         "source": source,
@@ -586,6 +677,7 @@ def _identify_tool_from_plan_step(step: str) -> Optional[str]:
         "annotate_with_markers",
         "interpret_cluster_results",
         "interpret_celltype_results",
+        "dataset_bio_qa",
         "run_ssgsea_enrichment",
     ):
         if tool_name in lowered:
@@ -1048,7 +1140,7 @@ async def response(state: AgentState):
             final_message = _format_memory_response(state)
         elif "status_check" in recognized_labels:
             final_message = _format_status_response(state)
-        elif dataset_result:
+        elif dataset_result and _config_flag(state, "enable_dataset_qa", True):
             work_dir = dataset_result.get("work_dir") or state.get("work_dir")
             final_message = _build_dataset_followup_message(dataset_result, work_dir)
         else:
@@ -1056,7 +1148,7 @@ async def response(state: AgentState):
                 state.get("messages", []),
                 state.get("objective", ""),
             )
-            if question:
+            if question and _config_flag(state, "enable_rag", True):
                 answer_text, rag_metadata = _generate_bio_rag_answer(question, state)
                 analysis_notes["last_rag"] = {
                     **rag_metadata,
@@ -1107,6 +1199,37 @@ async def general_planner(state: AgentState) -> AgentState:
     Dynamically generate execution plans based on intent and available tools
     """
     logger.info("[General Planner] Start planning based on user intent and available tools")
+
+    track_metrics = _config_flag(state, "track_metrics", True)
+    if track_metrics:
+        metrics = state.setdefault("metrics", {})
+        metrics["planner_invocations"] = metrics.get("planner_invocations", 0) + 1
+
+    planner_mode = _config_value(state, "planner_mode", "multi_agent")
+    if planner_mode == "disabled":
+        state["messages"].append(
+            AIMessage(
+                content="<PLAN_SKIPPED>Planner disabled by runtime configuration. Responding directly.</PLAN_SKIPPED>"
+            )
+        )
+        state["plan"] = []
+        state["next_step"] = "response"
+        return state
+
+    if planner_mode == "linear":
+        include_dataset_qa = _config_flag(state, "enable_dataset_qa", True)
+        plan_steps = _default_linear_plan(include_dataset_qa)
+        state["plan"] = plan_steps
+        state["messages"].append(
+            AIMessage(
+                content="<PLAN_GENERATED>\n"
+                + json.dumps({"steps": plan_steps}, ensure_ascii=False, indent=2)
+                + "\n</PLAN_GENERATED>"
+            )
+        )
+        state["next_step"] = "general_executor" if plan_steps else "response"
+        return state
+
     input_files = state.get("input_files", [])
     
     # Create a working directory
@@ -1261,6 +1384,17 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
 
     tool_outputs = []
     tool_call_state = False
+    track_metrics = _config_flag(state, "track_metrics", True)
+    metrics = state.setdefault("metrics", {}) if track_metrics else {}
+    allow_tools = _config_flag(state, "allow_tool_execution", True)
+    failure_cfg = _config_value(state, "failure_injection", None)
+    rng: Optional[random.Random] = None
+    if isinstance(failure_cfg, dict) and failure_cfg.get("rate"):
+        seed = failure_cfg.get("seed")
+        rng = state.get("_failure_rng")
+        if rng is None:
+            rng = random.Random(seed)
+            state["_failure_rng"] = rng
 
     for tool_call in decision_message.tool_calls:
         tool_name = tool_call.get("name")
@@ -1269,10 +1403,21 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
 
         print(f"Attempting to call tool: {tool_name} with args: {tool_args}")
 
+        if not allow_tools:
+            warning = f"Tool execution disabled by configuration. Skipping call to {tool_name}."
+            tool_outputs.append(
+                ToolMessage(
+                    content=f"Error: {warning}",
+                    name=tool_name or "unknown_tool",
+                    tool_call_id=tool_call_id
+                )
+            )
+            continue
+
         if tool_name not in tools_by_name:
             error_msg = f"Tool '{tool_name}' not found in available tools."
             print(error_msg)
-            
+
             tool_outputs.append(
                 ToolMessage(
                     content=f"Error: {error_msg}",
@@ -1282,12 +1427,30 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
             )
         else:
             try:
+                if tool_name == "dataset_bio_qa" and not _config_flag(state, "enable_dataset_qa", True):
+                    skip_msg = "Dataset knowledge retrieval disabled by configuration."
+                    tool_outputs.append(
+                        ToolMessage(
+                            content=f"Error: {skip_msg}",
+                            name=tool_name,
+                            tool_call_id=tool_call_id,
+                        )
+                    )
+                    continue
+
+                if rng and tool_name in set(failure_cfg.get("tool_names", [])):
+                    if rng.random() < float(failure_cfg.get("rate", 0.0)):
+                        raise RuntimeError("Injected tool failure for robustness experiment")
+
                 tool_to_call: BaseTool = tools_by_name[tool_name]
 
                 if hasattr(tool_to_call, 'ainvoke'):
                     tool_result = await tool_to_call.ainvoke(tool_args)
                 else:
                     tool_result = tool_to_call.invoke(tool_args)
+
+                if track_metrics:
+                    metrics["tool_calls"] = metrics.get("tool_calls", 0) + 1
 
                 state.setdefault("tool_history", []).append(
                     {
@@ -1333,6 +1496,8 @@ async def _handle_tool_calls(state: AgentState, decision_message: AIMessage, cur
                 print(error_msg)
                 import traceback
                 traceback.print_exc()
+                if track_metrics:
+                    metrics["tool_errors"] = metrics.get("tool_errors", 0) + 1
                 tool_outputs.append(
                     ToolMessage(
                         content=f"Error: {error_msg}",
@@ -1359,6 +1524,9 @@ async def general_executor(state: AgentState) -> AgentState:
     """
     Universal executor: executes the current planned step, supports tool invocation and error handling
     """
+    if _config_flag(state, "track_metrics", True):
+        metrics = state.setdefault("metrics", {})
+        metrics["executor_invocations"] = metrics.get("executor_invocations", 0) + 1
     plan = state.get("plan", [])
     if not plan:
         print("[General Executor] No remaining plan steps to execute.")
@@ -1434,13 +1602,14 @@ Here is the recent conversation history: This provides a complete background of 
                 print(error_msg)
                 state["messages"].append(AIMessage(content=f"<EXECUTION_ERROR>{error_msg}</EXECUTION_ERROR>"))
                 state["next_step"] = "general_executor"
-            
+
             print(f"LLM provided a direct response or requesr for input: {response_content}")
-            
+
             observation_content = f"<observation>LLM response to task '{current_step}':{response_content}</observation>"
             state["messages"].append(AIMessage(content=observation_content))
             state["next_step"] = "replanner"
-            
+            _ensure_replanner_route(state)
+
     except Exception as e:
         error_msg = f"An unexpected error occurred in execute_step: {e}"
         print(error_msg)
@@ -1448,7 +1617,8 @@ Here is the recent conversation history: This provides a complete background of 
         traceback.print_exc()
         state["messages"].append(AIMessage(content=f"<EXECUTION_ERROR>{error_msg}</EXECUTION_ERROR>"))
         state["next_step"] = "replanner"
-        
+        _ensure_replanner_route(state)
+
     return state
 
 
@@ -1458,7 +1628,15 @@ async def intelligent_replanner(state: AgentState) -> AgentState:
     Intelligent replanning: Analyze execution status, dynamically adjust plans or provide responses
     """
     logger.info("[Intelligent Replanner] Start re planning and analyzing")
-    
+
+    if not _config_flag(state, "enable_replanner", True):
+        _ensure_replanner_route(state)
+        return state
+
+    if _config_flag(state, "track_metrics", True):
+        metrics = state.setdefault("metrics", {})
+        metrics["replanner_invocations"] = metrics.get("replanner_invocations", 0) + 1
+
     messages: List[BaseMessage] = state.get("messages", [])
     current_plan: List[str] = state.get("plan", [])
     current_step = current_plan[0] if current_plan else "Unknown or finished step"
@@ -1625,6 +1803,9 @@ Full Conversation History:
                 state["next_step"] = "response"
                 state["execution_status"] = "failed"
                 return state
+            if _config_flag(state, "track_metrics", True):
+                metrics = state.setdefault("metrics", {})
+                metrics["plan_regenerations"] = metrics.get("plan_regenerations", 0) + 1
             plan_summary = "\n".join([f"{i+1}. {step}" for i, step in enumerate(new_plan)])
             observation_content = f"<observation>Replanner generated a new plan. Reasoning: {reasoning}\nNew Plan:\n{plan_summary}</observation>"
             state["messages"].append(AIMessage(content=observation_content))
@@ -1742,21 +1923,31 @@ def build_graph():
 
 
 def create_initial_state(
-    objective: str, input_files: Optional[List[str]], thread_id: Optional[str]
+    objective: str,
+    input_files: Optional[List[str]],
+    thread_id: Optional[str],
+    runtime_config: Optional[AgentRuntimeConfig] = None,
 ) -> Tuple[AgentState, str]:
+    config = runtime_config or AgentRuntimeConfig()
     resolved_thread_id = (thread_id or str(uuid4())).strip() or str(uuid4())
-    memory_context = conversation_memory.load_context(
-        thread_id=resolved_thread_id, objective=objective
-    )
-    memory_messages = conversation_memory.build_context_messages(memory_context)
-    project_state = (
-        json.loads(json.dumps(memory_context.project_state))
-        if memory_context.project_state
-        else {}
-    )
-    project_message = build_project_state_message(project_state)
-    if project_message:
-        memory_messages.insert(0, SystemMessage(content=project_message))
+
+    if config.enable_memory:
+        memory_context = conversation_memory.load_context(
+            thread_id=resolved_thread_id, objective=objective
+        )
+        memory_messages = conversation_memory.build_context_messages(memory_context)
+        project_state = (
+            json.loads(json.dumps(memory_context.project_state))
+            if memory_context.project_state
+            else {}
+        )
+        project_message = build_project_state_message(project_state)
+        if project_message:
+            memory_messages.insert(0, SystemMessage(content=project_message))
+    else:
+        memory_context = MemoryContext()
+        memory_messages: List[SystemMessage] = []
+        project_state = {}
 
     state: AgentState = {
         "objective": objective,
@@ -1766,10 +1957,10 @@ def create_initial_state(
         "plan": [],
         "next_step": None,
         "memory_summary": memory_context.summary,
-        "memory_records": [record.__dict__ for record in memory_context.records],
+        "memory_records": [record.__dict__ for record in getattr(memory_context, "records", [])],
         "thread_id": resolved_thread_id,
         "replan_attempts": 0,
-        "max_replan_attempts": 4,
+        "max_replan_attempts": max(1, config.max_replan_attempts),
         "execution_status": "in_progress",
         "intent_trace": {},
         "work_dir": None,
@@ -1777,7 +1968,11 @@ def create_initial_state(
         "analysis_notes": {},
         "recognized_intents": [],
         "project_state": project_state,
+        "runtime_config": config.to_dict(),
     }
+
+    if config.track_metrics:
+        state["metrics"] = {}
 
     if project_state:
         datasets = project_state.get("datasets", {})
@@ -1796,15 +1991,22 @@ def create_initial_state(
 
 
 async def run_objective(
-    objective: str, input_files: Optional[List[str]] = None, thread_id: Optional[str] = None
+    objective: str,
+    input_files: Optional[List[str]] = None,
+    thread_id: Optional[str] = None,
+    runtime_config: Optional[AgentRuntimeConfig] = None,
+    return_diagnostics: bool = False,
 ):
     """运行通用智能体"""
+    config = runtime_config or AgentRuntimeConfig()
     logger.info(f"[Agent] 开始执行任务: {objective}")
     if input_files:
         logger.info(f"[Agent] 输入文件: {input_files}")
 
 
-    initial_state, resolved_thread_id = create_initial_state(objective, input_files, thread_id)
+    initial_state, resolved_thread_id = create_initial_state(
+        objective, input_files, thread_id, config
+    )
 
     graph = build_graph()
     final_output: Optional[Any] = None
@@ -1834,29 +2036,30 @@ async def run_objective(
         if should_break:
             break
 
-    if final_state is not None:
-        messages = final_state.get("messages", [])
-        result_text: Optional[str]
-        if isinstance(final_output, BaseMessage):
-            result_text = getattr(final_output, "content", None)
-        else:
-            result_text = str(final_output) if final_output is not None else None
+    final_text: Optional[str] = None
+    if isinstance(final_output, BaseMessage):
+        final_text = getattr(final_output, "content", None)
+    elif final_output is not None:
+        final_text = str(final_output)
 
+    if final_state is not None and config.enable_memory:
+        messages = final_state.get("messages", [])
         conversation_memory.store_conversation(
             thread_id=resolved_thread_id,
             objective=objective,
             messages=messages,
-            result_text=result_text,
+            result_text=final_text,
             metadata={
                 "input_files": input_files or [],
                 "project_state": serialise_project_state(final_state.get("project_state", {})),
             },
         )
 
-    if isinstance(final_output, BaseMessage):
-        return final_output
-    if final_output is not None:
-        return final_output
+    if return_diagnostics:
+        return (final_text or "任务执行完成", final_state)
+
+    if final_text is not None:
+        return final_text
 
     return "任务执行完成"
 

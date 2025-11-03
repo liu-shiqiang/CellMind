@@ -1,106 +1,176 @@
-"""Utilities for aggregating metrics across experiment runs."""
+"""Metric utilities shared across experiments."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from statistics import mean
-from typing import Dict, Iterable, List
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Sequence, Tuple
 
-from src.experiments.workflows import WorkflowRun
+import numpy as np
+import pandas as pd
+
+from .agent_runner import AgentRunResult
 
 
 @dataclass
-class AggregateMetrics:
-    label: str
-    success_rate: float
-    avg_runtime: float
-    avg_tool_calls: float
-    avg_clarity: float
-    plan_edit_distance: float = 0.0
-    plan_modifications: float = 0.0
-    recovery_rate: float = 0.0
-    memory_precision: float = 0.0
-    memory_recall: float = 0.0
-    knowledge_accuracy: float = 0.0
+class ConfusionMatrix:
+    labels: List[str]
+    matrix: np.ndarray
+
+    def as_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame(self.matrix, index=self.labels, columns=self.labels)
 
 
-def _safe_mean(values: Iterable[float]) -> float:
-    items = list(values)
-    return float(mean(items)) if items else 0.0
+def results_dataframe(results: Iterable[AgentRunResult]) -> pd.DataFrame:
+    records: List[Dict[str, object]] = []
+    for item in results:
+        records.append(
+            {
+                "task_id": item.task.task_id,
+                "category": item.task.category,
+                "difficulty": item.task.difficulty,
+                "config": item.config_name,
+                "run_index": item.run_index,
+                "success": item.success,
+                "duration_sec": item.duration_sec,
+                "tool_calls": item.tool_calls,
+                "tool_errors": item.tool_errors,
+                "planner_invocations": item.planner_invocations,
+                "plan_regenerations": item.plan_regenerations,
+                "replanner_invocations": item.replanner_invocations,
+                "keyword_recall": item.keyword_recall,
+                "keyword_hits": item.keyword_hits,
+                "keyword_total": item.keyword_total,
+                "execution_status": item.execution_status,
+                "final_message": item.final_message,
+            }
+        )
+    return pd.DataFrame.from_records(records)
 
 
-def summarise_runs(label: str, runs: Iterable[WorkflowRun]) -> AggregateMetrics:
-    runs = list(runs)
-    if not runs:
-        return AggregateMetrics(label=label, success_rate=0.0, avg_runtime=0.0, avg_tool_calls=0.0, avg_clarity=0.0)
+def summarise_by_config(df: pd.DataFrame) -> pd.DataFrame:
+    agg = (
+        df.groupby("config")
+        .agg(
+            success_rate=("success", "mean"),
+            mean_duration=("duration_sec", "mean"),
+            median_duration=("duration_sec", "median"),
+            mean_tool_calls=("tool_calls", "mean"),
+            planner_invocations=("planner_invocations", "mean"),
+            replanner_invocations=("replanner_invocations", "mean"),
+            keyword_recall=("keyword_recall", "mean"),
+        )
+        .reset_index()
+    )
+    return agg
 
-    success_rate = sum(1 for run in runs if run.success) / len(runs)
-    avg_runtime = _safe_mean(run.runtime for run in runs)
-    avg_tool_calls = _safe_mean(run.tool_call_count for run in runs)
-    avg_clarity = _safe_mean(run.clarity_score for run in runs)
-    plan_edit = _safe_mean(run.plan_edit_distance for run in runs if run.plan_edit_distance is not None)
-    plan_mods = _safe_mean(run.plan_modifications for run in runs)
-    recovery_rate = sum(1 for run in runs if run.recovered_from_failure) / len(runs)
-    memory_precision = _safe_mean(run.memory_precision for run in runs if run.memory_precision is not None)
-    memory_recall = _safe_mean(run.memory_recall for run in runs if run.memory_recall is not None)
-    knowledge_accuracy = _safe_mean(run.knowledge_accuracy for run in runs if run.knowledge_accuracy is not None)
 
-    return AggregateMetrics(
-        label=label,
-        success_rate=round(success_rate, 3),
-        avg_runtime=round(avg_runtime, 3),
-        avg_tool_calls=round(avg_tool_calls, 2),
-        avg_clarity=round(avg_clarity, 2),
-        plan_edit_distance=round(plan_edit, 3),
-        plan_modifications=round(plan_mods, 2),
-        recovery_rate=round(recovery_rate, 3),
-        memory_precision=round(memory_precision, 3),
-        memory_recall=round(memory_recall, 3),
-        knowledge_accuracy=round(knowledge_accuracy, 3),
+def summarise_by_task(df: pd.DataFrame) -> pd.DataFrame:
+    agg = (
+        df.groupby(["task_id", "config"])
+        .agg(
+            success_rate=("success", "mean"),
+            mean_duration=("duration_sec", "mean"),
+            mean_tool_calls=("tool_calls", "mean"),
+            keyword_recall=("keyword_recall", "mean"),
+        )
+        .reset_index()
+    )
+    return agg
+
+
+def failure_recovery_table(df: pd.DataFrame) -> pd.DataFrame:
+    subset = df[df["replanner_invocations"].notna()].copy()
+    subset["replanner_invocations"] = subset["replanner_invocations"].fillna(0).astype(int)
+    subset["tool_errors"] = subset["tool_errors"].fillna(0).astype(int)
+    subset = subset[subset["tool_errors"] > 0]
+    if subset.empty:
+        return subset
+    return (
+        subset.groupby(["config", "replanner_invocations"])
+        .agg(success_rate=("success", "mean"), count=("success", "size"))
+        .reset_index()
     )
 
 
-def group_by_label(runs: Iterable[WorkflowRun], *, key) -> Dict[str, List[WorkflowRun]]:
-    grouped: Dict[str, List[WorkflowRun]] = {}
-    for run in runs:
-        grouped.setdefault(key(run), []).append(run)
-    return grouped
-
-
-def summarise_by_dataset(runs: Iterable[WorkflowRun]) -> Dict[str, AggregateMetrics]:
-    grouped = group_by_label(runs, key=lambda run: run.dataset.name)
-    return {dataset: summarise_runs(dataset, subset) for dataset, subset in grouped.items()}
-
-
-def summarise_by_task(runs: Iterable[WorkflowRun]) -> Dict[str, AggregateMetrics]:
-    grouped = group_by_label(runs, key=lambda run: run.task.task_id)
-    return {task: summarise_runs(task, subset) for task, subset in grouped.items()}
-
-
-def build_table(rows: Iterable[AggregateMetrics]) -> List[Dict[str, float]]:
-    table: List[Dict[str, float]] = []
-    for row in rows:
-        table.append(
-            {
-                "label": row.label,
-                "success_rate": row.success_rate,
-                "avg_runtime": row.avg_runtime,
-                "avg_tool_calls": row.avg_tool_calls,
-                "avg_clarity": row.avg_clarity,
-                "plan_edit_distance": row.plan_edit_distance,
-                "plan_modifications": row.plan_modifications,
-                "recovery_rate": row.recovery_rate,
-                "memory_precision": row.memory_precision,
-                "memory_recall": row.memory_recall,
-                "knowledge_accuracy": row.knowledge_accuracy,
-            }
+def memory_scores(df: pd.DataFrame) -> pd.DataFrame:
+    memory_df = df[df["category"] == "memory"].copy()
+    if memory_df.empty:
+        return memory_df
+    return (
+        memory_df.groupby("config")
+        .agg(
+            memory_success_rate=("success", "mean"),
+            memory_keyword_recall=("keyword_recall", "mean"),
         )
-    return table
+        .reset_index()
+    )
+
+
+def knowledge_accuracy(df: pd.DataFrame) -> pd.DataFrame:
+    knowledge_df = df[df["category"].isin(["knowledge_retrieval", "cell_communication", "pathway_analysis"])]
+    if knowledge_df.empty:
+        return knowledge_df
+    return (
+        knowledge_df.groupby("config")
+        .agg(
+            accuracy=("keyword_recall", "mean"),
+            duration=("duration_sec", "mean"),
+        )
+        .reset_index()
+    )
+
+
+def build_confusion_matrix(
+    ground_truth: Sequence[str], predictions: Sequence[str]
+) -> ConfusionMatrix:
+    labels = sorted(set(ground_truth) | set(predictions))
+    label_index = {label: idx for idx, label in enumerate(labels)}
+    matrix = np.zeros((len(labels), len(labels)), dtype=int)
+
+    for gt, pred in zip(ground_truth, predictions):
+        matrix[label_index[gt], label_index[pred]] += 1
+
+    return ConfusionMatrix(labels=labels, matrix=matrix)
+
+
+def classification_report(confusion: ConfusionMatrix) -> pd.DataFrame:
+    df = confusion.as_dataframe()
+    totals = df.sum(axis=1)
+    precision = []
+    recall = []
+    f1 = []
+    for idx, label in enumerate(confusion.labels):
+        tp = df.iloc[idx, idx]
+        fp = df.iloc[:, idx].sum() - tp
+        fn = df.iloc[idx, :].sum() - tp
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        precision.append(prec)
+        recall.append(rec)
+        if prec + rec > 0:
+            f1.append(2 * prec * rec / (prec + rec))
+        else:
+            f1.append(0.0)
+    return pd.DataFrame(
+        {
+            "label": confusion.labels,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "support": totals.tolist(),
+        }
+    )
 
 
 __all__ = [
-    "AggregateMetrics",
-    "summarise_runs",
-    "summarise_by_dataset",
+    "AgentRunResult",
+    "ConfusionMatrix",
+    "results_dataframe",
+    "summarise_by_config",
     "summarise_by_task",
-    "build_table",
+    "failure_recovery_table",
+    "memory_scores",
+    "knowledge_accuracy",
+    "build_confusion_matrix",
+    "classification_report",
 ]

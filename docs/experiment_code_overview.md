@@ -1,60 +1,49 @@
 # 实验自动化代码设计说明
 
-本文档概述 `src/experiments` 目录下新增模块的职责与关键设计决策，以便研究人员快速理解并扩展实验流水线。
+本文档概述 `src/experiments` 目录下的实验自动化实现，帮助研究人员理解如何基于 `agent_new.py` 的多智能体架构复现实验 1–6 并生成论文所需的指标与图表。
 
 ## 1. 模块结构
 
 ```
 src/experiments/
-├── __init__.py
-├── analysis_pipeline.py
-├── metrics.py
-├── runner.py
-├── tasks.py
-├── visualization.py
-└── workflows.py
+├── __init__.py              # 暴露 ExperimentSuite
+├── agent_runner.py          # 单次任务执行与运行结果封装
+├── experiments.py           # 六大实验的 orchestration
+├── metrics.py               # 指标聚合与统计
+├── plots.py                 # 图 3A–3F 的绘制函数
+├── runner.py                # Typer CLI 入口
+└── task_library.py          # 任务库与意图基准数据
 ```
 
-- **`analysis_pipeline.py`**：封装单细胞分析核心工具的调用顺序，提供统一的 `SingleCellAnalysisPipeline` 类，用于在实验中按需执行数据加载、嵌入提取、聚类、注释、富集分析以及知识检索。该模块还实现了 `ToolFailureInjector`，用于在鲁棒性实验中注入可配置的工具故障。
-- **`tasks.py`**：定义任务与数据集的元数据结构，并根据给定 `.h5ad` 数据集自动生成包含简单、复合与模糊意图的任务组合，同时提供默认的知识问答问题库。
-- **`workflows.py`**：实现单代理基线与多代理规划执行器。`MultiAgentWorkflow` 模拟规划、重规划、记忆与知识检索的协同流程，而 `SingleAgentWorkflow` 则代表无规划、直接调用工具的基线。
-- **`metrics.py`**：聚合 `WorkflowRun` 的指标，输出任务成功率、运行时间、工具调用次数、计划编辑距离等统计量，并可按数据集或任务维度生成表格。
-- **`visualization.py`**：针对实验设计生成标准化图表，包括分组条形图、小提琴图、生存曲线、雷达图、散点图及混淆矩阵，统一使用 `matplotlib` 与 `seaborn` 风格。
-- **`runner.py`**：提供 `ExperimentSuite` 主入口，串联六个实验的执行逻辑、结果收集与可视化生成，并通过 `typer` 暴露 CLI 接口 `python -m src.experiments.runner`。
+- **`task_library.py`**：定义超过 10 个覆盖细胞注释、差异分析、富集、记忆/状态查询等场景的 `TaskSpec`，并提供 `memory_task_sequences()` 与 `knowledge_task_ids()` 便于选择特定实验任务。`build_intent_benchmark()` 生成 200 条标注意图样本用于实验 6。
+- **`agent_runner.py`**：封装对 `agent_new.run_objective` 的调用，尊重 `AgentRuntimeConfig` 中的规划器、记忆、RAG、故障注入等开关，返回 `AgentRunResult`（包含耗时、工具调用数、重规划次数、关键词命中率等）。
+- **`experiments.py`**：`ExperimentSuite` 串联六个实验，针对不同实验构造对照配置（如线性基线、planner disabled、failure injection、memory off），执行任务并调用 `metrics` / `plots` 生成表格与图像。实验 6 直接调用 `run_objective(..., return_diagnostics=True)` 读取 `recognized_intents`，计算意图混淆矩阵。
+- **`metrics.py`**：将 `AgentRunResult` 转为 `DataFrame`，提供按配置/任务聚合的成功率、耗时、工具调用、关键词召回等统计；`failure_recovery_table`、`memory_scores`、`knowledge_accuracy` 分别支撑实验 3/4/5 的专用指标；`build_confusion_matrix` 和 `classification_report` 输出实验 6 的评估。
+- **`plots.py`**：使用 `matplotlib` 绘制实验 1–6 对应的图 3A–3F，包括分组条形图、小提琴图、生存曲线、雷达图、准确率-延迟散点和混淆矩阵。所有函数会在输出路径缺失时自动创建目录。
+- **`runner.py`**：提供命令行入口 `python -m src.experiments.runner`，接收 `--dataset`、`--output-dir`、`--runs-per-task`、`--seed` 参数，内部创建 `ExperimentSuite` 并运行全部实验。
 
-## 2. 关键设计选择
+## 2. 与 `agent_new.py` 的集成方式
 
-### 2.1 工具调用与缓存
-`SingleCellAnalysisPipeline` 对工具返回的工件进行追踪，并在启用缓存时复用中间结果，以便在多次运行时避免重复计算。记忆相关实验复用同一个 `ConversationMemoryStore`，确保跨运行的上下文一致性。
+- 所有实验均通过 `AgentRuntimeConfig` 调节 `agent_new` 的规划器、重规划器、记忆、RAG、工具执行以及故障注入等特性，从而直接在真实多智能体实现上进行对比与消融。
+- 线性基线、无规划、禁用记忆/RAG 等情形通过 `planner_mode`、`enable_replanner`、`enable_memory`、`enable_dataset_qa` 等开关控制，避免额外构造独立工作流。
+- 实验 3 的鲁棒性评估利用 `FailureInjectionConfig` 在指定工具上以 30% 概率注入故障，并比较启用/禁用重规划器的恢复情况。
+- 实验 4 将同一 `thread_id` 连续运行记忆写入与提问任务，衡量多轮对话记忆召回准确率；禁用记忆的配置使用不同 thread 以确保无持久化上下文。
+- 实验 6 通过 `return_diagnostics=True` 直接读取 `recognized_intents` 并归一化标签，构建 200 条样本的混淆矩阵与分类报告。
 
-### 2.2 多代理特性模拟
-`MultiAgentWorkflow` 通过显式的计划生成与步骤执行，模拟真实系统中的规划、执行、重规划流程。每一步调用 `SingleCellAnalysisPipeline`，并根据工具调用结果推导计划编辑距离、失败恢复率等指标。
+## 3. 输出物
 
-### 2.3 实验维度覆盖
-`ExperimentSuite` 将实验拆分为独立函数，分别控制规划消融、重规划器故障注入、记忆开关、知识检索开关等变量。每个实验返回结构化的 `WorkflowRun` 列表，便于统一聚合与可视化。
+运行 `python -m src.experiments.runner --dataset /path/to/data.h5ad --output-dir results --runs-per-task 20` 后，将生成：
 
-### 2.4 图表与表格输出
-`_generate_outputs` 方法集中生成论文所需的图表（图 3A–3F）以及综合指标表（表 2），所有文件默认写入 `results/figures/` 与 `results/table_2_metrics.csv`。当某个实验缺乏有效数据时会自动跳过图表生成并在日志中给出原因提示，避免出现空白图像。
+- `aggregated_results.csv`：所有任务的原始运行记录与指标。
+- `summary_by_config.csv` / `summary_by_task.csv`：用于表 2 的综合统计。
+- `fig_3a_grouped_bars.png` 至 `fig_3f_confusion.png`：对应论文图 3A–3F。
+- `intent_predictions.csv` 与 `intent_classification_report.csv`：实验 6 的详细预测与分类报告。
+- `metadata.json`：记录运行参数（随机种子、任务轮数、数据集路径等）。
 
-### 2.5 可观测性与失败诊断
-`SingleCellAnalysisPipeline` 的每次工具调用都会记录耗时、参数与错误信息，`ExperimentSuite` 在执行结束后会生成 `failure_report.json`，汇总所有失败运行的任务、实验分支以及对应的工具错误，方便研究人员快速定位问题。CLI 支持通过 `--log-level` 参数调整输出等级（默认为 `INFO`），日志格式统一为 `[时间戳] 级别 模块: 消息`，也会在出现工具异常时打印堆栈信息。
+若某些实验在当前配置下缺乏有效数据（例如未注入故障导致生存曲线为空），绘图函数会自动跳过并保持其他图表正常输出。
 
-## 3. 使用指南
+## 4. 扩展建议
 
-1. 在本地准备 `.h5ad` 数据集后执行：
-   ```bash
-   python -m src.experiments.runner --dataset /path/to/sample.h5ad --output-dir results --runs-per-task 20 --log-level INFO
-   ```
-2. 运行结束后，`results/` 目录包含：
-   - `figures/figure_3A_*` 等图像文件；
-   - `table_2_metrics.csv` 综合指标；
-   - `failure_report.json`（若存在失败运行）；
-   - `conversation_memory.json` 长期记忆快照。
-3. 若需调整任务或指标，可修改 `tasks.py` 中的任务生成逻辑，或在 `metrics.py`/`visualization.py` 中添加新的统计与图表函数。
-
-## 4. 后续扩展建议
-
-- 接入真实的意图识别模型，替换 `RuleBasedIntentClassifier` 以获取更精确的混淆矩阵。
-- 在 `SingleCellAnalysisPipeline` 中增加更多工具节点（如伪时间分析、细胞互作），以覆盖实验设计中提及的全部任务类型。
-- 将图表生成函数与报告模板对接，实现一键导出 PDF 或 Markdown 形式的实验报告。
-
+- 如需新增任务或调整意图覆盖，可直接修改 `task_library.py` 中的 `TaskSpec` 列表或 `build_intent_benchmark` 模板。
+- 如果要引入新的评估指标，可在 `metrics.py` 添加聚合函数，并在 `experiments.py` 中调用后输出相应表格或图像。
+- 通过扩展 `AgentRuntimeConfig` 可继续探索更多组件的消融（例如自适应重规划策略），只需在 `agent_new.py` 中新增对应开关并在实验中传递配置即可。

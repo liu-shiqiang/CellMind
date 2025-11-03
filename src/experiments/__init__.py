@@ -1,5 +1,5 @@
-"""Experiment automation suite for Genomix multi-agent evaluation."""
+"""Utilities for running Genomix multi-agent evaluation experiments."""
 
-from .runner import run_all_experiments
+from .experiments import ExperimentSuite
 
-__all__ = ["run_all_experiments"]
+__all__ = ["ExperimentSuite"]
