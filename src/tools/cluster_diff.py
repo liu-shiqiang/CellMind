@@ -38,8 +38,15 @@ def cluster_and_diff(
     sample = work.name
     clustered_path = work / f"{sample}_clustered.h5ad"
     diff_gene_path = work / f"{sample}_diff_gene.csv"
+    if clustered_path.exists() and diff_gene_path.exists():
+        return json.dumps({
+             "work_dir": str(work),
+             "clustered_path": str(clustered_path),
+             "diff_gene_path": str(diff_gene_path),
+        })
+
     sc.settings.figdir = str(work)
-    
+
     adata = sc.read_h5ad(emb)
 
     sc.pp.neighbors(adata,use_rep="X_scgpt", n_neighbors=15)
@@ -71,7 +78,7 @@ def cluster_and_diff(
         adata, groupby="scGPT_clusters", standard_scale="var", n_genes=5,save = "_dotplot_scgpt_clustered.png", show=False
     )
 
-    # Compute gene difference 
+    # Compute gene difference
     diff_genes_df = sc.get.rank_genes_groups_df(adata, group=None)
     result_df = pd.DataFrame({
     'cluster': diff_genes_df['group'].unique(),

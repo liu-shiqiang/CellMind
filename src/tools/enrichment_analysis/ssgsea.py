@@ -386,6 +386,41 @@ def run_ssgsea_enrichment(
     work_path.mkdir(parents=True, exist_ok=True)
     outdir = Path(_ensure_outdir(work_path / "enrichment" / "ssgsea"))
 
+    json_path = outdir / "ssgsea_result.json"
+    summary_path = outdir / "ssgsea_summary.txt"
+    tsv_path = outdir / "ssgsea_top_terms.tsv"
+    scores_path = outdir / "ssgsea_scores.tsv"
+    heatmap_path = outdir / "ssgsea_heatmap.png"
+
+    if json_path.exists() and summary_path.exists() and tsv_path.exists():
+        try:
+            cached = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            cached = {}
+        top_terms = cached.get("top_pathways") or []
+        n_sig = cached.get("n_significant")
+        if not top_terms:
+            message = "No enriched pathways."
+        else:
+            message = f"{int(n_sig)} significant pathways (FDR<{fdr_threshold})." if n_sig is not None else "No enriched pathways."
+        result_paths = {
+            "json": str(json_path.resolve()),
+            "summary": str(summary_path.resolve()),
+            "tsv": str(tsv_path.resolve()),
+        }
+        if scores_path.exists():
+            result_paths["scores"] = str(scores_path.resolve())
+        if heatmap_path.exists():
+            result_paths["heatmap"] = str(heatmap_path.resolve())
+        payload = {
+            "status": "success",
+            "message": message,
+            "result_paths": result_paths,
+            "top_terms": top_terms,
+            "meta": cached.get("meta", {}),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
     analyzer = SSGSEAAnalyzer()
     result = analyzer.run(
         file_path=str(input_path),

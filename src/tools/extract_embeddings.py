@@ -36,6 +36,14 @@ def extract_embeddings_with_scgpt(
     sample_name = work.name
     emb_path = work / f"{sample_name}_emb.h5ad"
 
+    if emb_path.exists():
+        return json.dumps(
+            {
+                "work_dir": str(work),
+                "embeddings_path": str(emb_path),
+            }
+        )
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     try:

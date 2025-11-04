@@ -193,17 +193,30 @@ def annotate_with_markers(
     if not diff_gene_path.exists():
         raise FileNotFoundError(f"Marker gene file not found: {diff_gene_path}")
 
+    anno_h5ad = work / "annotated_with_celltype.h5ad"
+    anno_candidate_path = work / "cluster_celltype_annotation.txt"
+    anno_result_path = work / "cluster_celltype_rank1.csv"
+
+    if anno_h5ad.exists() and anno_candidate_path.exists() and anno_result_path.exists():
+        return json.dumps(
+            {
+                "work_dir": str(work),
+                "annoted_Path": str(anno_h5ad),
+                "anno_candidate": str(anno_candidate_path),
+                "anno_result": str(anno_result_path),
+            }
+        )
+
     adata = sc.read_h5ad(clustered_path)
     diff_gene_df = pd.read_csv(diff_gene_path)
 
     marker_df = pd.read_csv(settings.MARKER_GENE_FILE)
 
-    anno_candidate_file = manual_cluster_annotation(adata, marker_df, diff_gene_df, str(work_dir))  
+    anno_candidate_file = manual_cluster_annotation(adata, marker_df, diff_gene_df, str(work_dir))
     anno_result_file = generate_rank1_in_cluster(work_dir)
 
     df = pd.read_csv(anno_result_file, dtype={'Cluster': str, 'CellType': str})
     cluster_to_celltype = dict(zip(df.Cluster, df.CellType))
-    anno_h5ad = work / "annotated_with_celltype.h5ad"
     adata.obs['pred_celltype'] = adata.obs['scGPT_clusters'].map(cluster_to_celltype)
     adata.write_h5ad(anno_h5ad)
     sc.pl.umap(adata,color="pred_celltype",save="_umap_annoted.png",show=False, title='Cell Type UMAP', frameon=False)

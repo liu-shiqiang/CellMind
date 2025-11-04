@@ -35,6 +35,16 @@ def load_h5ad_data(
 
     preproc_path = work_dir / f"{base_name}_preprocessed.h5ad"
 
+    if preproc_path.exists():
+        # The dataset has already been preprocessed for this work directory.
+        # Reuse the cached result instead of re-running the expensive pipeline.
+        return json.dumps(
+            {
+                "work_dir": str(work_dir),
+                "preproc_path": str(preproc_path),
+            }
+        )
+
     try:
         processor = ScGPTDataProcessor(
             raw_adata_file_name=file_path,
@@ -53,7 +63,7 @@ def load_h5ad_data(
             raise FileNotFoundError(f"Preprocessing finished but file not found: {preproc_path}")
     except Exception as exc:
         raise RuntimeError(f"scGPT preprocessing failed: {exc}")
-    
+
     result={
             "work_dir": str(work_dir),
             "preproc_path": str(preproc_path),
