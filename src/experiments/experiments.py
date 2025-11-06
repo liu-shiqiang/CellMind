@@ -6,8 +6,9 @@ import asyncio
 import json
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -69,10 +70,143 @@ class ExperimentSuite:
         self.rng = random.Random(seed)
         self.tasks: Dict[str, TaskSpec] = task_index()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.run_log_dir = self.output_dir / "run_logs"
+        self.run_log_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Experiment runners
     # ------------------------------------------------------------------
+    def _log_json_line(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(payload, ensure_ascii=False, default=self._json_default)
+                + "\n"
+            )
+
+    @staticmethod
+    def _json_default(obj: Any) -> Any:
+        if isinstance(obj, (set, tuple)):
+            return list(obj)
+        return str(obj)
+
+    def _record_run_result(self, result: AgentRunResult, experiment: str) -> None:
+        log_entry: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "experiment": experiment,
+            "task_id": result.task.task_id,
+            "task_category": result.task.category,
+            "task_difficulty": result.task.difficulty,
+            "requires_dataset": result.task.requires_dataset,
+            "task_objective": result.task.objective,
+            "config": result.config_name,
+            "run_index": result.run_index,
+            "thread_id": result.thread_id,
+            "success": result.success,
+            "execution_status": result.execution_status,
+            "duration_sec": result.duration_sec,
+            "metrics": result.metrics,
+            "tool_calls": result.tool_calls,
+            "tool_errors": result.tool_errors,
+            "planner_invocations": result.planner_invocations,
+            "plan_regenerations": result.plan_regenerations,
+            "replanner_invocations": result.replanner_invocations,
+            "keyword_hits": result.keyword_hits,
+            "keyword_total": result.keyword_total,
+            "final_message": result.final_message,
+        }
+        path = self.run_log_dir / f"{experiment}.jsonl"
+        self._log_json_line(path, log_entry)
+
+    def _record_task_exception(
+        self,
+        experiment: str,
+        task: TaskSpec,
+        config_name: str,
+        run_index: int,
+        base_thread_id: str,
+        error: Exception,
+    ) -> None:
+        thread_id = f"{base_thread_id}-{task.task_id}-{config_name}-{run_index}"
+        log_entry: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "experiment": experiment,
+            "task_id": task.task_id,
+            "task_category": task.category,
+            "task_difficulty": task.difficulty,
+            "requires_dataset": task.requires_dataset,
+            "task_objective": task.objective,
+            "config": config_name,
+            "run_index": run_index,
+            "thread_id": thread_id,
+            "success": False,
+            "execution_status": "exception",
+            "duration_sec": None,
+            "metrics": {},
+            "tool_calls": 0,
+            "tool_errors": 0,
+            "planner_invocations": 0,
+            "plan_regenerations": 0,
+            "replanner_invocations": 0,
+            "keyword_hits": 0,
+            "keyword_total": len(task.expected_keywords),
+            "final_message": "",
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+        }
+        path = self.run_log_dir / f"{experiment}.jsonl"
+        self._log_json_line(path, log_entry)
+
+    def _execute_task(
+        self,
+        experiment: str,
+        task: TaskSpec,
+        runtime_config: AgentRuntimeConfig,
+        config_name: str,
+        run_index: int,
+        base_thread_id: str,
+    ) -> AgentRunResult:
+        try:
+            result = run_agent_task(
+                task,
+                self.dataset_path,
+                runtime_config,
+                config_name,
+                run_index,
+                base_thread_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._record_task_exception(
+                experiment,
+                task,
+                config_name,
+                run_index,
+                base_thread_id,
+                exc,
+            )
+            raise
+        self._record_run_result(result, experiment)
+        return result
+
+    def _record_intent_prediction(
+        self,
+        sample: IntentBenchmarkSample,
+        predicted: str,
+        response: str,
+        index: int,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "experiment": "experiment6_intent",
+            "sample_index": index,
+            "prompt": sample.prompt,
+            "ground_truth": sample.label,
+            "predicted": predicted,
+            "is_correct": predicted == sample.label,
+            "response": response,
+        }
+        self._log_json_line(self.run_log_dir / "experiment6_intent.jsonl", payload)
+
     def _experiment_baseline_vs_multi(self) -> List[AgentRunResult]:
         dataset_tasks = [self.tasks[task_id] for task_id in dataset_task_ids()]
         default_config = AgentRuntimeConfig()
@@ -89,9 +223,9 @@ class ExperimentSuite:
             base_thread = f"exp1-{self.seed}-{run_idx}"
             for task in dataset_tasks:
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment1_baseline_vs_multi",
                         task,
-                        self.dataset_path,
                         default_config,
                         "multi_agent",
                         run_idx,
@@ -99,9 +233,9 @@ class ExperimentSuite:
                     )
                 )
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment1_baseline_vs_multi",
                         task,
-                        self.dataset_path,
                         baseline_config,
                         "linear_baseline",
                         run_idx,
@@ -124,9 +258,9 @@ class ExperimentSuite:
             base_thread = f"exp2-{self.seed}-{run_idx}"
             for task in composite_tasks:
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment2_planner_ablation",
                         task,
-                        self.dataset_path,
                         default_config,
                         "multi_agent",
                         run_idx,
@@ -134,9 +268,9 @@ class ExperimentSuite:
                     )
                 )
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment2_planner_ablation",
                         task,
-                        self.dataset_path,
                         ablated_config,
                         "no_planner",
                         run_idx,
@@ -171,9 +305,9 @@ class ExperimentSuite:
             )
             for task in dataset_tasks:
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment3_replanner",
                         task,
-                        self.dataset_path,
                         with_replanner,
                         "replanner",
                         run_idx,
@@ -181,9 +315,9 @@ class ExperimentSuite:
                     )
                 )
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment3_replanner",
                         task,
-                        self.dataset_path,
                         without_replanner,
                         "no_replanner",
                         run_idx,
@@ -203,9 +337,9 @@ class ExperimentSuite:
             for seed_task, follow_up in memory_pairs:
                 thread_id = f"{base_thread}-{seed_task.task_id}"
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment4_memory",
                         seed_task,
-                        self.dataset_path,
                         memory_config,
                         "memory_enabled",
                         run_idx,
@@ -213,9 +347,9 @@ class ExperimentSuite:
                     )
                 )
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment4_memory",
                         follow_up,
-                        self.dataset_path,
                         memory_config,
                         "memory_enabled",
                         run_idx,
@@ -225,9 +359,9 @@ class ExperimentSuite:
 
                 cold_thread = f"{base_thread}-cold-{seed_task.task_id}"
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment4_memory",
                         seed_task,
-                        self.dataset_path,
                         no_memory_config,
                         "memory_disabled",
                         run_idx,
@@ -235,9 +369,9 @@ class ExperimentSuite:
                     )
                 )
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment4_memory",
                         follow_up,
-                        self.dataset_path,
                         no_memory_config,
                         "memory_disabled",
                         run_idx,
@@ -256,9 +390,9 @@ class ExperimentSuite:
             base_thread = f"exp5-{self.seed}-{run_idx}"
             for task in knowledge_tasks:
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment5_knowledge",
                         task,
-                        self.dataset_path,
                         with_rag,
                         "rag_enabled",
                         run_idx,
@@ -266,9 +400,9 @@ class ExperimentSuite:
                     )
                 )
                 runs.append(
-                    run_agent_task(
+                    self._execute_task(
+                        "experiment5_knowledge",
                         task,
-                        self.dataset_path,
                         without_rag,
                         "rag_disabled",
                         run_idx,
@@ -317,6 +451,7 @@ class ExperimentSuite:
                     "response": final_text,
                 }
             )
+            self._record_intent_prediction(sample, predicted, final_text, idx)
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------
