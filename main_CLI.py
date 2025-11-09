@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import json
 import asyncio
 import scanpy as sc
@@ -113,7 +114,10 @@ def main(persistent_thread_id: Optional[str] = None) -> Optional[str]:
 
     # 获取用户任务描述
     print("\n Please enter the analysis task description (e.g. 'Cell Type Annotation', 'Pathway Enrichment Analysis',' Regulatory Network Inference '):")
+    # print('stdin encoding:', sys.stdin.encoding)
+
     user_task = input("task: ").strip()
+    print("Received:", repr(user_task))
 
     if not user_task:
         print("Task description cannot be empty")
