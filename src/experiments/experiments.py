@@ -455,17 +455,74 @@ class ExperimentSuite:
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Public runners used by the dedicated experiment scripts
+    # ------------------------------------------------------------------
+    def run_experiment1(self) -> List[AgentRunResult]:
+        runs = self._experiment_baseline_vs_multi()
+        self._export_results(
+            runs,
+            pd.DataFrame(),
+            experiment_name="experiment1_baseline_vs_multi",
+        )
+        return runs
+
+    def run_experiment2(self) -> List[AgentRunResult]:
+        runs = self._experiment_planner_ablation()
+        self._export_results(
+            runs,
+            pd.DataFrame(),
+            experiment_name="experiment2_planner_ablation",
+        )
+        return runs
+
+    def run_experiment3(self) -> List[AgentRunResult]:
+        runs = self._experiment_replanner()
+        self._export_results(
+            runs,
+            pd.DataFrame(),
+            experiment_name="experiment3_replanner",
+        )
+        return runs
+
+    def run_experiment4(self) -> List[AgentRunResult]:
+        runs = self._experiment_memory()
+        self._export_results(
+            runs,
+            pd.DataFrame(),
+            experiment_name="experiment4_memory",
+        )
+        return runs
+
+    def run_experiment5(self) -> List[AgentRunResult]:
+        runs = self._experiment_knowledge()
+        self._export_results(
+            runs,
+            pd.DataFrame(),
+            experiment_name="experiment5_knowledge",
+        )
+        return runs
+
+    def run_experiment6(self) -> pd.DataFrame:
+        intent_predictions = self._experiment_intent()
+        self._export_results(
+            [],
+            intent_predictions,
+            experiment_name="experiment6_intent",
+        )
+        return intent_predictions
+
     def run(self) -> ExperimentResult:
         all_runs: List[AgentRunResult] = []
-        all_runs.extend(self._experiment_baseline_vs_multi())
-        all_runs.extend(self._experiment_planner_ablation())
-        all_runs.extend(self._experiment_replanner())
-        all_runs.extend(self._experiment_memory())
-        all_runs.extend(self._experiment_knowledge())
+        all_runs.extend(self.run_experiment1())
+        all_runs.extend(self.run_experiment2())
+        all_runs.extend(self.run_experiment3())
+        all_runs.extend(self.run_experiment4())
+        all_runs.extend(self.run_experiment5())
 
-        intent_predictions = self._experiment_intent()
+        intent_predictions = self.run_experiment6()
 
-        self._export_results(all_runs, intent_predictions)
+        self._export_results(all_runs, intent_predictions, experiment_name="all")
         return ExperimentResult(all_runs=all_runs, intent_predictions=intent_predictions)
 
     # ------------------------------------------------------------------
@@ -473,46 +530,57 @@ class ExperimentSuite:
         self,
         results: List[AgentRunResult],
         intent_predictions: pd.DataFrame,
+        experiment_name: str,
     ) -> None:
-        df = results_dataframe(results)
-        df.to_csv(self.output_dir / "aggregated_results.csv", index=False)
+        output_dir = self.output_dir / experiment_name
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        summary_config = summarise_by_config(df)
-        summary_config.to_csv(self.output_dir / "summary_by_config.csv", index=False)
+        df = results_dataframe(results) if results else pd.DataFrame()
+        if not df.empty:
+            df.to_csv(output_dir / "aggregated_results.csv", index=False)
 
-        summary_task = summarise_by_task(df)
-        summary_task.to_csv(self.output_dir / "summary_by_task.csv", index=False)
+            summary_config = summarise_by_config(df)
+            summary_config.to_csv(output_dir / "summary_by_config.csv", index=False)
 
-        plot_grouped_bars(summary_config, self.output_dir / "fig_3a_grouped_bars.png")
-        planner_subset = df[df["config"].isin(["multi_agent", "no_planner"])]
-        if not planner_subset.empty:
-            plot_violin_tool_calls(
-                planner_subset,
-                self.output_dir / "fig_3b_planner_violin.png",
-            )
+            summary_task = summarise_by_task(df)
+            summary_task.to_csv(output_dir / "summary_by_task.csv", index=False)
 
-        survival = failure_recovery_table(df)
-        if not survival.empty:
-            plot_survival_curve(survival, self.output_dir / "fig_3c_survival.png")
+            if experiment_name.startswith("experiment1") or experiment_name == "all":
+                plot_grouped_bars(summary_config, output_dir / "fig_3a_grouped_bars.png")
 
-        memory_df = memory_scores(df)
-        if not memory_df.empty:
-            plot_radar_memory(memory_df, self.output_dir / "fig_3d_memory_radar.png")
+            if experiment_name.startswith("experiment2") or experiment_name == "all":
+                planner_subset = df[df["config"].isin(["multi_agent", "no_planner"])]
+                if not planner_subset.empty:
+                    plot_violin_tool_calls(
+                        planner_subset,
+                        output_dir / "fig_3b_planner_violin.png",
+                    )
 
-        knowledge_df = knowledge_accuracy(df)
-        if not knowledge_df.empty:
-            plot_accuracy_latency(knowledge_df, self.output_dir / "fig_3e_accuracy_latency.png")
+            if experiment_name.startswith("experiment3") or experiment_name == "all":
+                survival = failure_recovery_table(df)
+                if not survival.empty:
+                    plot_survival_curve(survival, output_dir / "fig_3c_survival.png")
 
-        if not intent_predictions.empty:
+            if experiment_name.startswith("experiment4") or experiment_name == "all":
+                memory_df = memory_scores(df)
+                if not memory_df.empty:
+                    plot_radar_memory(memory_df, output_dir / "fig_3d_memory_radar.png")
+
+            if experiment_name.startswith("experiment5") or experiment_name == "all":
+                knowledge_df = knowledge_accuracy(df)
+                if not knowledge_df.empty:
+                    plot_accuracy_latency(
+                        knowledge_df, output_dir / "fig_3e_accuracy_latency.png"
+                    )
+
+        if (experiment_name.startswith("experiment6") or experiment_name == "all") and not intent_predictions.empty:
             confusion = build_confusion_matrix(
                 intent_predictions["ground_truth"], intent_predictions["predicted"]
             )
-            plot_confusion_matrix(confusion, self.output_dir / "fig_3f_confusion.png")
-            intent_predictions.to_csv(
-                self.output_dir / "intent_predictions.csv", index=False
-            )
+            plot_confusion_matrix(confusion, output_dir / "fig_3f_confusion.png")
+            intent_predictions.to_csv(output_dir / "intent_predictions.csv", index=False)
             classification_report(confusion).to_csv(
-                self.output_dir / "intent_classification_report.csv",
+                output_dir / "intent_classification_report.csv",
                 index=False,
             )
 
@@ -521,8 +589,9 @@ class ExperimentSuite:
             "seed": self.seed,
             "dataset_path": str(self.dataset_path) if self.dataset_path else None,
             "total_runs": len(results),
+            "experiment": experiment_name,
         }
-        (self.output_dir / "metadata.json").write_text(
+        (output_dir / "metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2)
         )
 
