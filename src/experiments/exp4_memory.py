@@ -7,7 +7,15 @@ from typing import Optional
 
 import typer
 
-from .experiments import ExperimentSuite
+# Support both package (`python -m src.experiments.exp4_memory`) and
+# direct script execution (`python src/experiments/exp4_memory.py`).
+try:  # pragma: no cover - import guard
+    from .experiments import ExperimentSuite
+except ImportError:  # pragma: no cover - fallback for direct execution
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from experiments import ExperimentSuite
 
 app = typer.Typer(help="Run Experiment 4: Memory ablation (with vs without conversation memory).")
 

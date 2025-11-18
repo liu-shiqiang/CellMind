@@ -7,7 +7,15 @@ from typing import Optional
 
 import typer
 
-from .experiments import ExperimentSuite
+# Support both package (`python -m src.experiments.exp5_knowledge`) and
+# direct script execution (`python src/experiments/exp5_knowledge.py`).
+try:  # pragma: no cover - import guard
+    from .experiments import ExperimentSuite
+except ImportError:  # pragma: no cover - fallback for direct execution
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from experiments import ExperimentSuite
 
 app = typer.Typer(help="Run Experiment 5: Knowledge retrieval vs disabled baseline.")
 

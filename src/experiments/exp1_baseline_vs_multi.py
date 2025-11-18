@@ -7,7 +7,15 @@ from typing import Optional
 
 import typer
 
-from .experiments import ExperimentSuite
+# Support both package (`python -m src.experiments.exp1_baseline_vs_multi`) and
+# direct script execution (`python src/experiments/exp1_baseline_vs_multi.py`).
+try:  # pragma: no cover - import guard
+    from .experiments import ExperimentSuite
+except ImportError:  # pragma: no cover - fallback for direct execution
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from experiments import ExperimentSuite
 
 app = typer.Typer(help="Run Experiment 1: Baseline vs multi-agent workflow.")
 
