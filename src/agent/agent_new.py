@@ -98,8 +98,6 @@ TOOL_STEP_LABELS: Dict[str, str] = {
     "extract_embeddings_with_scgpt": "提取 scGPT 嵌入",
     "cluster_and_diff": "聚类与差异分析",
     "annotate_with_markers": "细胞类型注释",
-    "interpret_cluster_results": "聚类功能解读",
-    "interpret_celltype_results": "细胞类型叙述生成",
     "run_ssgsea_enrichment": "ssGSEA 富集分析",
     "dataset_bio_qa": "知识库问答总结",
 }
@@ -153,8 +151,6 @@ def _default_linear_plan(include_dataset_qa: bool = True) -> List[str]:
         "Call extract_embeddings_with_scgpt to compute latent embeddings.",
         "Execute cluster_and_diff for clustering and differential expression.",
         "Invoke annotate_with_markers to label cell types.",
-        "Run interpret_cluster_results to summarise cluster-level findings.",
-        "Run interpret_celltype_results to build the cell-type narrative.",
     ]
     if include_dataset_qa:
         steps.append("Leverage dataset_bio_qa for knowledge-base grounded reporting.")
@@ -613,16 +609,6 @@ def _update_project_state_from_tool(
         )
         _mark_completed(dataset_entry, tool_name)
 
-    elif tool_name == "interpret_cluster_results" and payload:
-        dataset_entry.setdefault("interpretation", {})
-        dataset_entry["interpretation"].update(payload)
-        _mark_completed(dataset_entry, tool_name)
-
-    elif tool_name == "interpret_celltype_results" and payload:
-        dataset_entry.setdefault("celltype_report", {})
-        dataset_entry["celltype_report"].update(payload)
-        _mark_completed(dataset_entry, tool_name)
-
     elif tool_name == "run_ssgsea_enrichment" and payload:
         enrichment = dataset_entry.setdefault("enrichment", {})
         enrichment["ssgsea"] = payload
@@ -656,12 +642,6 @@ def _is_tool_already_completed(dataset_entry: Dict[str, Any], tool_name: str) ->
         return bool(
             dataset_entry.get("annotated_path") or dataset_entry.get("annotation", {}).get("result_path")
         )
-    if tool_name == "interpret_cluster_results":
-        interpretation = dataset_entry.get("interpretation", {})
-        return bool(interpretation.get("dataset_report") or interpretation.get("clusters"))
-    if tool_name == "interpret_celltype_results":
-        report = dataset_entry.get("celltype_report", {})
-        return bool(report.get("report_path") or report.get("celltype_context_path"))
     if tool_name == "run_ssgsea_enrichment":
         enrichment = dataset_entry.get("enrichment", {}).get("ssgsea", {})
         return bool(enrichment.get("result_paths") or enrichment.get("status"))
@@ -675,8 +655,6 @@ def _identify_tool_from_plan_step(step: str) -> Optional[str]:
         "extract_embeddings_with_scgpt",
         "cluster_and_diff",
         "annotate_with_markers",
-        "interpret_cluster_results",
-        "interpret_celltype_results",
         "dataset_bio_qa",
         "run_ssgsea_enrichment",
     ):
