@@ -33,57 +33,80 @@ def build_task_suite() -> List[TaskSpec]:
 
     tasks: List[TaskSpec] = [
         TaskSpec(
-            task_id="dataset_overview_basic",
-            objective="快速浏览上传的 scRNA-seq 数据，报告细胞和基因数量，并指出是否包含已知批次信息",
-            category="quality_control",
+            task_id="load_and_overview",
+            objective=(
+                "加载上传的 h5ad 单细胞数据，报告细胞数、基因数，并列出 obs 中与批次或样本相关的列名（如 batch、sample、patient 等)"
+            ),
+            category="data_loading",
             difficulty="simple",
             expected_keywords=("细胞", "基因"),
         ),
         TaskSpec(
-            task_id="qc_threshold_review",
-            objective="检查现有质量控制过滤标准（如线粒体比例、最小基因数）是否合理，并给出是否需要微调的简短建议（无需重新计算）",
-            category="quality_control",
+            task_id="scgpt_embedding_summary",
+            objective=(
+                "检查当前数据是否已经存在 scGPT 细胞嵌入；如不存在则生成嵌入，并汇总说明嵌入的维度及潜在用途"
+            ),
+            category="preprocessing",
             difficulty="simple",
-            expected_keywords=("质量", "过滤"),
+            expected_keywords=("嵌入", "scGPT"),
         ),
         TaskSpec(
-            task_id="cell_annotation_basic",
-            objective="基于已生成的聚类结果完成基础细胞类型注释，为每个聚类给出 2-3 个代表性标记基因",
+            task_id="cluster_and_diff_summary",
+            objective=(
+                "基于已有或新生成的嵌入，对细胞进行聚类并完成基础差异表达摘要；汇总每个聚类的细胞数量，并针对一个代表性聚类列出前 5 个上调基因"
+            ),
+            category="clustering_analysis",
+            difficulty="composite",
+            expected_keywords=("聚类", "差异"),
+        ),
+        TaskSpec(
+            task_id="marker_based_annotation",
+            objective=(
+                "利用 marker 基因知识库，对聚类结果进行基础细胞类型注释；为每个主要聚类给出预测细胞类型及 2–3 个代表性标记基因"
+            ),
             category="cell_annotation",
             difficulty="simple",
             expected_keywords=("注释", "标记"),
         ),
         TaskSpec(
-            task_id="marker_gene_panel",
-            objective="列出免疫相关簇的上调标记基因（可复用已计算的差异结果），帮助快速识别主要免疫亚群",
-            category="marker_gene_analysis",
-            difficulty="simple",
-            expected_keywords=("免疫", "标记"),
-        ),
-        TaskSpec(
-            task_id="differential_expression_pair",
-            objective="对最常见的两个聚类汇总前 5 个上调基因及功能（优先复用已生成的差异结果，无需重复计算）",
-            category="differential_expression",
-            difficulty="composite",
-            expected_keywords=("差异", "上调"),
-        ),
-        TaskSpec(
-            task_id="ssgsea_enrichment_focus",
-            objective="在已注释的主要免疫簇上汇总或快速补充 ssGSEA 结果，列出显著富集的免疫相关通路（可直接复用缓存）",
+            task_id="ssgsea_immune_enrichment",
+            objective=(
+                "在已注释的免疫相关聚类上运行或复用缓存的 ssGSEA 分析，列出显著富集的免疫相关通路并简要解释其功能"
+            ),
             category="pathway_analysis",
             difficulty="composite",
             expected_keywords=("ssGSEA", "通路"),
         ),
         TaskSpec(
-            task_id="dataset_consistency_check",
-            objective="检查是否存在明显的批次或样本分层迹象，基于已生成的UMAP/聚类结果给出可视化或后续检查建议（无需重新跑分析）",
-            category="clustering_analysis",
+            task_id="cellphonedb_communication_summary",
+            objective=(
+                "基于当前的细胞类型注释结果，调用 CellPhoneDB 核心分析，识别主要细胞类别之间显著的配体-受体相互作用，并总结 2–3 个关键通讯轴"
+            ),
+            category="cell_communication",
+            difficulty="composite",
+            expected_keywords=("通讯", "配体"),
+        ),
+        TaskSpec(
+            task_id="pseudotime_lineage_overview",
+            objective=(
+                "对一个选定的细胞亚群运行伪时间分析，识别潜在的分化路径，并列出沿轨迹变化最明显的 3–5 个基因及其可能的生物学含义"
+            ),
+            category="trajectory_analysis",
+            difficulty="composite",
+            expected_keywords=("伪时间", "轨迹"),
+        ),
+        TaskSpec(
+            task_id="bio_qa_from_results",
+            objective=(
+                "结合前面步骤生成的聚类、注释、差异和富集结果，回答一个简短的生物学问答，并显式引用已有分析"
+            ),
+            category="knowledge_retrieval",
             difficulty="simple",
-            expected_keywords=("批次", "可视化"),
+            expected_keywords=("报告", "解释"),
         ),
         TaskSpec(
             task_id="plan_next_steps",
-            objective="在已完成聚类和标注的前提下，建议下一个高价值的分析步骤并说明原因（如差异/富集/通讯）",
+            objective="在已完成聚类和标注的前提下，建议下一个高价值的分析步骤并说明原因",
             category="clarification",
             difficulty="ambiguous",
             requires_dataset=False,
@@ -112,13 +135,6 @@ def build_task_suite() -> List[TaskSpec]:
             difficulty="simple",
             requires_dataset=False,
             expected_keywords=("进展", "结果"),
-        ),
-        TaskSpec(
-            task_id="bio_qa_basic",
-            objective="结合已生成的解释/报告，回答一个简短的生物学问答（如主要免疫细胞类型及功能特点）",
-            category="knowledge_retrieval",
-            difficulty="simple",
-            expected_keywords=("报告", "解释"),
         ),
         TaskSpec(
             task_id="greeting_chitchat",
