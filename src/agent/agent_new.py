@@ -1166,6 +1166,9 @@ async def response(state: AgentState):
         final_message = final_message.rstrip() + "\n\n如需进一步探讨，请继续提问。"
 
     state["messages"].append(AIMessage(content=final_message))
+    # Mark the run as completed so downstream experiment runners can
+    # correctly report success and terminate the LangGraph stream.
+    state["execution_status"] = "completed"
     state["next_step"] = "end"
 
     logger.info("[Response] Response content: %s", final_message)
@@ -2032,6 +2035,12 @@ async def run_objective(
                 "project_state": serialise_project_state(final_state.get("project_state", {})),
             },
         )
+
+    if final_state is not None and final_state.get("execution_status") not in {
+        "completed",
+        "failed",
+    }:
+        final_state["execution_status"] = "completed"
 
     if return_diagnostics:
         return (final_text or "任务执行完成", final_state)
