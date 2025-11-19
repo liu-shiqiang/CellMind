@@ -114,6 +114,13 @@ def build_task_suite() -> List[TaskSpec]:
             expected_keywords=("进展", "结果"),
         ),
         TaskSpec(
+            task_id="bio_qa_basic",
+            objective="结合已生成的解释/报告，回答一个简短的生物学问答（如主要免疫细胞类型及功能特点）",
+            category="knowledge_retrieval",
+            difficulty="simple",
+            expected_keywords=("报告", "解释"),
+        ),
+        TaskSpec(
             task_id="greeting_chitchat",
             objective="简单问候并确认已准备好接收下一步指令",
             category="greeting",
