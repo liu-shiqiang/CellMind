@@ -211,7 +211,7 @@ class ExperimentSuite:
         dataset_tasks = [self.tasks[task_id] for task_id in dataset_task_ids()]
         default_config = AgentRuntimeConfig()
         baseline_config = AgentRuntimeConfig(
-            planner_mode="linear",
+            planner_mode="react",
             enable_replanner=False,
             enable_memory=False,
             enable_rag=False,
@@ -237,7 +237,7 @@ class ExperimentSuite:
                         "experiment1_baseline_vs_multi",
                         task,
                         baseline_config,
-                        "linear_baseline",
+                        "react_baseline",
                         run_idx,
                         base_thread,
                     )

@@ -119,7 +119,7 @@ class FailureInjectionConfig:
 
 @dataclass
 class AgentRuntimeConfig:
-    planner_mode: Literal["multi_agent", "linear", "disabled"] = "multi_agent"
+    planner_mode: Literal["multi_agent", "linear", "react", "disabled"] = "multi_agent"
     enable_replanner: bool = True
     enable_memory: bool = True
     enable_rag: bool = True
@@ -156,6 +156,82 @@ def _default_linear_plan(include_dataset_qa: bool = True) -> List[str]:
         steps.append("Leverage dataset_bio_qa for knowledge-base grounded reporting.")
     steps.append("Run run_ssgsea_enrichment to compute pathway enrichment scores.")
     return steps
+
+
+async def _run_react_baseline(
+    objective: str,
+    input_files: Optional[List[str]],
+    thread_id: str,
+    config: AgentRuntimeConfig,
+):
+    """Execute a lightweight single-agent ReAct loop for baseline comparisons.
+
+    This path avoids the multi-agent planner/replanner stack while still
+    allowing the LLM to decide which tools to call step-by-step.
+    """
+
+    prompt_parts = [objective.strip()]
+    if input_files:
+        prompt_parts.append(
+            "\n".join(
+                [
+                    "以下是可用的输入文件路径，请在需要时直接调用工具进行分析:",
+                    *[f"- {path}" for path in input_files],
+                ]
+            )
+        )
+    user_prompt = "\n\n".join([part for part in prompt_parts if part])
+
+    # ReAct agent with tool awareness
+    react_agent = create_react_agent(llm_with_tools, tools)
+
+    try:
+        result = await react_agent.ainvoke(
+            {"messages": [HumanMessage(content=user_prompt)]},
+            config={"recursion_limit": 50, "configurable": {"thread_id": thread_id}},
+        )
+        messages = result.get("messages") if isinstance(result, dict) else None
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.error("[ReAct Baseline] Execution failed: %s", exc)
+        failure_state: Dict[str, Any] = {
+            "execution_status": "failed",
+            "metrics": {"tool_calls": 0, "tool_errors": 1},
+            "tool_history": [],
+            "thread_id": thread_id,
+            "runtime_config": config.to_dict(),
+            "messages": [AIMessage(content=str(exc))],
+        }
+        return AIMessage(content=f"任务执行失败: {exc}"), failure_state
+
+    messages = messages or []
+    # If a single message is returned, normalise to list for downstream logic
+    if isinstance(messages, BaseMessage):
+        messages = [messages]
+
+    tool_history: List[Dict[str, Any]] = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            tool_history.append({"name": msg.name, "content": msg.content})
+
+    tool_calls = len(tool_history)
+    final_message = messages[-1] if messages else AIMessage(content="")
+
+    final_state: Dict[str, Any] = {
+        "execution_status": "completed",
+        "metrics": {
+            "tool_calls": tool_calls,
+            "tool_errors": 0,
+            "planner_invocations": 0,
+            "plan_regenerations": 0,
+            "replanner_invocations": 0,
+        },
+        "tool_history": tool_history,
+        "thread_id": thread_id,
+        "runtime_config": config.to_dict(),
+        "messages": messages,
+    }
+
+    return final_message, final_state
 
 
 def _get_runtime_config(state: "AgentState") -> Dict[str, Any]:
@@ -1988,6 +2064,14 @@ async def run_objective(
     initial_state, resolved_thread_id = create_initial_state(
         objective, input_files, thread_id, config
     )
+
+    if config.planner_mode == "react":
+        final_output, final_state = await _run_react_baseline(
+            objective, input_files, resolved_thread_id, config
+        )
+        if not return_diagnostics:
+            return final_output
+        return final_output, final_state
 
     graph = build_graph()
     final_output: Optional[Any] = None

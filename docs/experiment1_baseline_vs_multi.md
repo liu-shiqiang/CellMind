@@ -1,4 +1,4 @@
-# 实验 1：多智能体 vs 线性基线（baseline_vs_multi）
+# 实验 1：多智能体 vs ReAct 基线（baseline_vs_multi）
 
 本文档整理 `ExperimentSuite` 中实验 1 的设计细节，便于研究人员核对运行配置、任务覆盖与预期输出。运行入口为 `src/experiments/exp1_baseline_vs_multi.py`，也可通过 `ExperimentSuite.run_experiment1()` 触发批量运行。
 
@@ -24,7 +24,7 @@
 在每个任务上对比两套运行时配置，均使用相同的随机种子与线程前缀以便配对分析：
 
 - **multi_agent（默认）**：开启规划器、重规划器、记忆、RAG 与数据集 QA。【F:src/experiments/experiments.py†L210-L235】
-- **linear_baseline**：线性规划模式，禁用重规划、记忆、RAG 与数据集 QA。【F:src/experiments/experiments.py†L213-L244】
+- **react_baseline**：单智能体 ReAct 工程流，禁用重规划、记忆、RAG 与数据集 QA，直接由模型逐步调用工具。【F:src/experiments/experiments.py†L210-L244】
 
 `runs_per_task` 控制重复次数；每个任务会按顺序运行 multi_agent 与 baseline 各一次（或多次），总运行次数为 `len(dataset_tasks) * runs_per_task * 2`。【F:src/experiments/experiments.py†L221-L245】
 
