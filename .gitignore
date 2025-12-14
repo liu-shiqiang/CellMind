@@ -20,3 +20,8 @@ test.py
 data/
 
 chroma_data/
+
+tests/
+
+uploaded_data/
+
