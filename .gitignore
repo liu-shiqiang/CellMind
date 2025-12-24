@@ -25,3 +25,7 @@ tests/
 
 uploaded_data/
 
+# macOS
+.DS_Store
+*.swp
+*.swo
