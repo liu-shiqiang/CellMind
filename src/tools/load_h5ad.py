@@ -1,28 +1,30 @@
 import os
 import json
 from pathlib import Path
+from typing import Optional
 from pydantic import BaseModel, Field, PositiveInt
 
 from langchain_core.tools import tool
 
 from src.bio_pretrained_model.data_prep import ScGPTDataProcessor
 from config.setting import settings
+from src.tools.artifact_paths import resolve_artifact_dir
 
 class LoadH5ADArgs(BaseModel):
     file_path: str = Field(description="Path to the input .h5ad file.")
 
 @tool(
-    "load_h5ad_data",
+    "load_h5ad_data_scgpt",
     args_schema=LoadH5ADArgs,
     return_direct=False,
 )
-def load_h5ad_data(
+def load_h5ad_data_scgpt(
     file_path: str,
-    output_dir: str = settings.OUTPUT_DIR,
+    output_dir: Optional[str] = None,
     model_path: str = settings.SCGPT_MODEL_DIR,
 ) -> str:
     """
-    Load and Preprocess an h5ad file and save results in a dedicated sub-folder.
+    Load and preprocess an h5ad file using the scGPT pipeline.
 
     """
     path = Path(file_path).expanduser().resolve()
@@ -30,7 +32,11 @@ def load_h5ad_data(
         raise FileNotFoundError(f"File not found or not .h5ad: {path}")
     
     base_name = path.stem
-    work_dir = Path(output_dir).expanduser().resolve()/base_name
+    work_dir = resolve_artifact_dir(
+        input_path=path,
+        work_dir=output_dir,
+        subdir=f"scgpt/{base_name}",
+    )
     work_dir.mkdir(parents=True, exist_ok=True)
 
     preproc_path = work_dir / f"{base_name}_preprocessed.h5ad"

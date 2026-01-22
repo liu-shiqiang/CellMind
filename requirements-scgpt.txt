@@ -1,0 +1,27 @@
+# scGPT Service Dependencies
+# scGPT 微服务专用依赖文件
+
+# PyTorch 生态系统 (兼容 scGPT 的版本)
+torch==2.1.0
+torchvision==0.16.0
+torchtext==0.16.0
+
+# scGPT 及其依赖
+scgpt>=1.0.0
+scANpy>=1.5.0
+
+# 数据处理
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.11.0
+scanpy>=1.9.0
+anndata>=0.10.0
+
+# Web 框架
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+requests>=2.31.0
+
+# 工具
+tqdm>=4.66.0

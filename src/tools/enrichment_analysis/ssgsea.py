@@ -7,10 +7,12 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import gseapy as gp
+import scanpy as sc
 from scipy.stats import norm, ranksums
 from statsmodels.stats.multitest import multipletests
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+from src.tools.artifact_paths import resolve_artifact_dir
 
 from .interface import EnrichmentAnalysiszer, EnrichmentVisualizer, EnrichmentEvaluator, EnrichmentFactory
 from .data_setting import load_pathway_genesets, load_expression, AnalysisResult
@@ -342,7 +344,10 @@ class SSGSEAFactory(EnrichmentFactory):
 
 class SSGSEAEnrichmentArgs(BaseModel):
     file_path: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
-    work_dir: str = Field(..., description="Work directory where ssGSEA outputs will be stored.")
+    work_dir: Optional[str] = Field(
+        default=None,
+        description="Work directory where ssGSEA outputs will be stored.",
+    )
     gene_set: str = Field(default="KEGG", description="Gene set library to use (e.g. KEGG, GO, Hallmark).")
     celltype_col: str = Field(default="pred_celltype", description="Column in AnnData.obs that defines cell groups.")
     target_celltypes: Optional[List[str]] = Field(default=None, description="Subset of cell types to include in the analysis.")
@@ -361,7 +366,7 @@ class SSGSEAEnrichmentArgs(BaseModel):
 @tool("run_ssgsea_enrichment", args_schema=SSGSEAEnrichmentArgs)
 def run_ssgsea_enrichment(
     file_path: str,
-    work_dir: str,
+    work_dir: Optional[str] = None,
     gene_set: str = "KEGG",
     celltype_col: str = "pred_celltype",
     target_celltypes: Optional[List[str]] = None,
@@ -382,9 +387,21 @@ def run_ssgsea_enrichment(
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    work_path = Path(work_dir).expanduser().resolve()
-    work_path.mkdir(parents=True, exist_ok=True)
-    outdir = Path(_ensure_outdir(work_path / "enrichment" / "ssgsea"))
+    work_path = resolve_artifact_dir(
+        input_path=input_path,
+        work_dir=work_dir,
+        subdir="enrichment/ssgsea",
+    )
+    outdir = Path(_ensure_outdir(work_path))
+
+    adata_preview = sc.read_h5ad(str(input_path))
+    if celltype_col not in adata_preview.obs.columns:
+        if "cell_type" in adata_preview.obs.columns:
+            celltype_col = "cell_type"
+        elif "pred_celltype" in adata_preview.obs.columns:
+            celltype_col = "pred_celltype"
+        else:
+            raise ValueError(f"AnnData.obs 不包含列 '{celltype_col}'")
 
     analyzer = SSGSEAAnalyzer()
     result = analyzer.run(
@@ -470,4 +487,3 @@ if __name__ == "__main__":
     ev = SSGSEAEvaluator()
     msg, paths = ev.evaluate(res, return_paths=True)
     print(msg, paths)
-

@@ -1,0 +1,5 @@
+{
+  "name": "CellMind: Multi-Agent Single-Cell Analysis",
+  "description": "An advanced biological intelligence platform using RAG and Multi-Agent systems for scRNA-seq analysis and scGPT-based cell embedding.",
+  "requestFramePermissions": []
+}

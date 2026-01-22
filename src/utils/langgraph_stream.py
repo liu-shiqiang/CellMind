@@ -1,4 +1,12 @@
-"""Utilities for streaming LangGraph agent events with a unified schema."""
+"""Utilities for streaming LangGraph agent events with a unified schema.
+
+Supports multiple streaming modes:
+- values: Full state after each step
+- updates: State updates after each step (default)
+- messages: LLM token-by-token streaming
+- custom: Custom user-defined events
+- debug: Maximum verbosity
+"""
 from __future__ import annotations
 
 import json
@@ -8,12 +16,12 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from src.agent.agent_new import (
-    AgentState,
-    build_graph,
+from src.agent.state import AgentState
+from src.agent.graph import (
+    get_agent_graph,
+    create_initial_state,
     build_project_state_message,
     conversation_memory,
-    create_initial_state,
     serialise_project_state,
 )
 
@@ -102,8 +110,31 @@ def _extract_final_ai_message(messages: Iterable[BaseMessage]) -> Optional[BaseM
     return None
 
 
+def as_state_dict(state: Any) -> Dict[str, Any]:
+    """Coerce LangGraph StateSnapshot-like objects into plain dicts."""
+    if state is None:
+        return {}
+    if isinstance(state, dict):
+        return state
+    for attr in ("values", "data"):
+        if hasattr(state, attr):
+            value = getattr(state, attr)
+            if isinstance(value, dict):
+                return value
+    try:
+        return dict(state)
+    except Exception:
+        return {"_state": state}
+
+
 class LangGraphEventAdapter:
-    """Transforms LangGraph state deltas into structured event payloads."""
+    """Transforms LangGraph state deltas into structured event payloads.
+
+    Enhanced to support native LangGraph streaming modes:
+    - messages mode: Captures LLM token-by-token output
+    - updates mode: Captures state changes per node
+    - custom mode: Captures custom user events
+    """
 
     def __init__(self, run_id: str, thread_id: str) -> None:
         self.run_id = run_id
@@ -113,6 +144,10 @@ class LangGraphEventAdapter:
         self.final_message: Optional[BaseMessage] = None
         self.error_info: Optional[Any] = None
         self.last_node: str = ""
+
+        # Token streaming state
+        self._accumulated_tokens: Dict[str, str] = {}  # node_id -> accumulated content
+        self._last_token_time: float = 0.0
 
     def _event(self, event_type: str, node: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -131,6 +166,51 @@ class LangGraphEventAdapter:
             {
                 "objective": objective,
                 "input_files": input_files,
+                "message": "🚀 Starting analysis...",
+            },
+        )
+
+    def build_progress_event(self, node: str, progress: float, message: str) -> Dict[str, Any]:
+        """Build a progress update event for UI feedback."""
+        return self._event(
+            "progress",
+            node,
+            {
+                "progress": progress,
+                "message": message,
+            },
+        )
+
+    def build_token_event(
+        self,
+        node: str,
+        token: str,
+        is_complete: bool = False,
+    ) -> Dict[str, Any]:
+        """Build a token streaming event for LLM output.
+
+        Args:
+            node: The node generating the token
+            token: The token content
+            is_complete: Whether this is the final token
+        """
+        return self._event(
+            "token",
+            node,
+            {
+                "token": token,
+                "is_complete": is_complete,
+            },
+        )
+
+    def build_node_enter_event(self, node: str) -> Dict[str, Any]:
+        """Build a lightweight node-enter event for token streaming mode."""
+        return self._event(
+            "node_enter",
+            node,
+            {
+                "next_step": node,
+                "message": f"⚙️ Executing: {node}",
             },
         )
 
@@ -145,21 +225,30 @@ class LangGraphEventAdapter:
         self.error_info = {"detail": str(error)}
 
     def process_node_event(self, node: str, state: AgentState) -> List[Dict[str, Any]]:
+        """Process node execution event and emit structured updates.
+
+        Returns a list of events to stream to the client.
+        """
         events: List[Dict[str, Any]] = []
         self.last_node = node
-        execution_status = state.get("execution_status")
+        state_dict = as_state_dict(state)
+        execution_status = state_dict.get("execution_status")
+
+        # Node entry event with progress
         events.append(
             self._event(
                 "node_enter",
                 node,
                 {
                     "execution_status": execution_status,
-                    "next_step": state.get("next_step"),
+                    "next_step": state_dict.get("next_step"),
+                    "message": f"⚙️ Executing: {node}",
                 },
             )
         )
 
-        plan = state.get("plan") or []
+        # Plan update if changed
+        plan = state_dict.get("plan") or []
         plan_payload = _serialise_plan(plan)
         plan_fingerprint = _fingerprint(plan_payload)
         if plan_payload and plan_fingerprint != self._plan_fingerprint:
@@ -170,39 +259,65 @@ class LangGraphEventAdapter:
                     node,
                     {
                         "plan": plan_payload,
+                        "message": f"📋 Plan updated: {len(plan)} steps",
                     },
                 )
             )
 
-        messages: List[BaseMessage] = state.get("messages", [])  # type: ignore[assignment]
+        # Process messages
+        messages: List[BaseMessage] = state_dict.get("messages", [])  # type: ignore[assignment]
         new_messages = messages[self._message_count :]
         self._message_count = len(messages)
 
         for message in new_messages:
             serialised = serialize_message(message)
             if isinstance(message, AIMessage) and message.tool_calls:
-                events.append(self._event("tool_call", node, {"message": serialised}))
+                events.append(
+                    self._event(
+                        "tool_call",
+                        node,
+                        {
+                            "message": serialised,
+                            "tool_count": len(message.tool_calls),
+                            "message": f"🔧 Calling {len(message.tool_calls)} tool(s)",
+                        },
+                    )
+                )
             elif isinstance(message, ToolMessage):
-                events.append(self._event("tool_result", node, {"message": serialised}))
+                events.append(
+                    self._event(
+                        "tool_result",
+                        node,
+                        {
+                            "message": serialised, # This should be the tool's actual output
+                        },
+                    )
+                )
 
+        # Capture final response message
         if node == "response" and messages:
             final_ai = _extract_final_ai_message(messages)
             if final_ai is not None:
                 self.final_message = final_ai
 
+        # Error handling
         if node == "error_info":
-            self.error_info = state  # type: ignore[assignment]
-            events.append(self.build_error_event(node, state))
+            self.error_info = state_dict
+            events.append(self.build_error_event(node, state_dict))
         elif execution_status == "failed" and self.error_info is None:
-            self.error_info = {"execution_status": execution_status}
+            self.error_info = state_dict.get("error_info") or {"execution_status": execution_status}
             events.append(self.build_error_event(node, self.error_info))
 
         return events
 
     def build_end_event(self, final_state: Optional[AgentState]) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {}
+        """Build the end event with summary."""
+        payload: Dict[str, Any] = {
+            "message": "✅ Analysis complete!",
+        }
         if final_state is not None:
-            payload["execution_status"] = final_state.get("execution_status")
+            final_state_dict = as_state_dict(final_state)
+            payload["execution_status"] = final_state_dict.get("execution_status")
         if self.final_message is not None:
             payload["response"] = serialize_message(self.final_message)
         if self.error_info is not None:
@@ -222,7 +337,8 @@ def _store_conversation(
     if final_state is None:
         return
 
-    messages: Iterable[BaseMessage] = final_state.get("messages", [])  # type: ignore[assignment]
+    final_state_dict = as_state_dict(final_state)
+    messages: Iterable[BaseMessage] = final_state_dict.get("messages", [])  # type: ignore[assignment]
     result_text: Optional[str] = None
     if final_message is not None:
         result_text = getattr(final_message, "content", None)
@@ -236,7 +352,7 @@ def _store_conversation(
         result_text=result_text,
         metadata={
             "input_files": input_files or [],
-            "project_state": serialise_project_state(final_state.get("project_state", {})),
+            "project_state": serialise_project_state(final_state_dict.get("project_state", {})),
         },
     )
 
@@ -247,33 +363,134 @@ async def run_agent_stream(
     thread_id: Optional[str],
     run_id: Optional[str],
     event_handler: EventHandler,
+    stream_mode: str = "updates",
 ) -> Tuple[Optional[BaseMessage], Optional[Any]]:
-    initial_state, resolved_thread_id = create_initial_state(objective, input_files, thread_id)
-    resolved_run_id = run_id or str(uuid4())
+    """Run agent with streaming support.
+
+    Args:
+        objective: User's analysis objective
+        input_files: Optional list of input file paths
+        thread_id: Conversation thread identifier
+        run_id: Execution run identifier
+        event_handler: Async callback for streaming events
+        stream_mode: LangGraph streaming mode
+            - "updates": Stream state updates (default, best for progress tracking)
+            - "values": Stream full state (verbose)
+            - "messages": Stream LLM tokens (best for real-time text output)
+            - "custom": Stream custom events only
+            - "debug": Maximum verbosity
+
+    Returns:
+        Tuple of (final_message, error_info)
+    """
+    initial_state = create_initial_state(
+        objective,
+        input_files,
+        thread_id,
+        run_id=run_id,
+    )
+    resolved_thread_id = initial_state.get("thread_id") or thread_id or str(uuid4())
+    resolved_run_id = run_id or initial_state.get("run_id") or str(uuid4())
     adapter = LangGraphEventAdapter(resolved_run_id, resolved_thread_id)
 
+    # Send start event
     await event_handler(adapter.build_start_event(objective, initial_state.get("input_files", [])))
 
-    graph = build_graph()
+    graph = get_agent_graph()
     final_state: Optional[AgentState] = None
 
     try:
-        async for event in graph.astream(
-            initial_state,
-            config={"recursion_limit": 50, "configurable": {"thread_id": resolved_thread_id}},
-        ):
-            for node, state in event.items():
-                if node == "__end__":
-                    continue
-                final_state = state
-                for payload in adapter.process_node_event(node, state):
-                    await event_handler(payload)
+        # Use native LangGraph streaming
+        if stream_mode == "messages":
+            # Token-level streaming
+            last_node: Optional[str] = None
+            async for message_chunk, metadata in graph.astream(
+                initial_state,
+                config={
+                    "recursion_limit": 50,
+                    "configurable": {"thread_id": resolved_thread_id},
+                },
+                stream_mode="messages",
+            ):
+                node = metadata.get("langgraph_node", "unknown")
+                if node != last_node:
+                    last_node = node
+                    adapter.last_node = node
+                    await event_handler(adapter.build_node_enter_event(node))
+
+                if message_chunk.content:
+                    await event_handler(
+                        adapter.build_token_event(node, message_chunk.content)
+                    )
+
+            # After token streaming, get final state
+            final_state = graph.get_state(
+                config={"configurable": {"thread_id": resolved_thread_id}}
+            )
+
+        elif stream_mode == "updates":
+            # Original node-level streaming
+            async for event in graph.astream(
+                initial_state,
+                config={
+                    "recursion_limit": 50,
+                    "configurable": {"thread_id": resolved_thread_id},
+                },
+                stream_mode="updates",
+            ):
+                for node, state in event.items():
+                    if node == "__end__":
+                        final_state = state
+                        continue
+                    final_state = state
+                    for payload in adapter.process_node_event(node, state):
+                        await event_handler(payload)
+
+        else:
+            # Other modes (values, debug, custom)
+            async for chunk in graph.astream(
+                initial_state,
+                config={
+                    "recursion_limit": 50,
+                    "configurable": {"thread_id": resolved_thread_id},
+                },
+                stream_mode=stream_mode,
+            ):
+                await event_handler(
+                    {
+                        "type": "raw",
+                        "run_id": resolved_run_id,
+                        "thread_id": resolved_thread_id,
+                        "stream_mode": stream_mode,
+                        "payload": chunk,
+                        "ts": _iso_now(),
+                    }
+                )
+            # Get final state
+            final_state = graph.get_state(
+                config={"configurable": {"thread_id": resolved_thread_id}}
+            )
+
     except Exception as exc:  # pragma: no cover - defensive
+        import traceback
+        traceback.print_exc()  # Print full traceback
         adapter.register_runtime_error(exc)
         await event_handler(adapter.build_error_event("runtime", {"detail": str(exc)}))
     finally:
+        # Extract final message from state
+        if final_state:
+            final_state_dict = as_state_dict(final_state)
+            messages = final_state_dict.get("messages", [])
+            if messages:
+                final_ai = _extract_final_ai_message(messages)
+                if final_ai:
+                    adapter.final_message = final_ai
+
+        # Send end event
         end_event = adapter.build_end_event(final_state)
         await event_handler(end_event)
+
+        # Store conversation
         _store_conversation(
             objective,
             input_files,

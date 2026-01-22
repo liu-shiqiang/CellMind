@@ -9,6 +9,7 @@ import anndata as ad
 import gseapy as gp
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+from src.tools.artifact_paths import resolve_artifact_dir
 
 from .interface import EnrichmentAnalysiszer, EnrichmentVisualizer, EnrichmentEvaluator, EnrichmentFactory
 from .data_setting import extract_gene_list_from_celltype, AnalysisResult
@@ -359,7 +360,14 @@ class ORAFactory(EnrichmentFactory):
 
 class ORAEnrichmentArgs(BaseModel):
     input_file: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
-    work_dir: str = Field(..., description="Work directory where enrichment outputs will be stored.")
+    work_dir: Optional[str] = Field(
+        default=None,
+        description="Work directory where enrichment outputs will be stored.",
+    )
+    celltype_col: str = Field(
+        default="pred_celltype",
+        description="Column in AnnData.obs containing cell type annotations.",
+    )
     target_celltype: Optional[str] = Field(default=None, description="Specific cell type to extract marker genes for enrichment.")
     gene_set: str = Field(default="kegg", description="Gene set library to use (e.g. 'kegg' or 'go').")
     top_n: Optional[int] = Field(default=None, description="Number of top marker genes to include from the selected population.")
@@ -373,7 +381,8 @@ class ORAEnrichmentArgs(BaseModel):
 @tool("run_ora_enrichment", args_schema=ORAEnrichmentArgs)
 def run_ora_enrichment(
     input_file: str,
-    work_dir: str,
+    work_dir: Optional[str] = None,
+    celltype_col: str = "pred_celltype",
     target_celltype: Optional[str] = None,
     gene_set: str = "kegg",
     top_n: Optional[int] = None,
@@ -389,15 +398,26 @@ def run_ora_enrichment(
     if not input_path.exists() and not (gene_list or gene_list_file):
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    work_path = Path(work_dir).expanduser().resolve()
-    work_path.mkdir(parents=True, exist_ok=True)
-    outdir = work_path / "enrichment" / "ora"
-    outdir.mkdir(parents=True, exist_ok=True)
+    work_path = resolve_artifact_dir(
+        input_path=input_path,
+        work_dir=work_dir,
+        subdir="enrichment/ora",
+    )
+    outdir = work_path
 
     analyzer = ORAAnalyzer()
+    if input_path.exists() and not (gene_list or gene_list_file):
+        adata_preview = ad.read_h5ad(str(input_path))
+        if celltype_col not in adata_preview.obs.columns:
+            if "cell_type" in adata_preview.obs.columns:
+                celltype_col = "cell_type"
+            elif "pred_celltype" in adata_preview.obs.columns:
+                celltype_col = "pred_celltype"
+            else:
+                raise ValueError(f"AnnData.obs 不包含列 '{celltype_col}'")
     result = analyzer.run(
         input_file=str(input_path),
-        celltype_col="pred_celltype",
+        celltype_col=celltype_col,
         target_celltype=target_celltype,
         gene_set=gene_set,
         top_n=top_n,

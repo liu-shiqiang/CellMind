@@ -12,7 +12,7 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from langchain_core.language_models import BaseLanguageModel
 
-from config.setting import settings
+from src.web.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class LLMManager:
             logger.error(f"创建LLM实例失败: {model_name}, 错误: {e}")
             # 降级到默认Ollama模型
             return ChatOllama(
-                model="deepseek-r1:32b",
+                model="qwen3:8b",
                 temperature=self._temperature,
                 base_url="http://localhost:11434"
             )

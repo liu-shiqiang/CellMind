@@ -14,15 +14,15 @@ class ExtractEmbeddingsArgs(BaseModel):
     work_dir: str = Field(description="Pre-sample folder created by load_h5ad_data")
 
 @tool(
-    "extract_embeddings_with_scgpt",
+    "extract_embeddings_with_scgpt_local",
     args_schema=ExtractEmbeddingsArgs
 )
-def extract_embeddings_with_scgpt(
+def extract_embeddings_with_scgpt_local(
     preproc_path: str,
     work_dir: str,
 ) -> str:
     """
-    Run scGPT model to generate 512-dim cell embeddings, merge them into the preprocessed AnnData, and save <sample>_emb.h5ad in *work_dir*.
+    Run scGPT locally to generate embeddings and save <sample>_emb.h5ad in work_dir.
     """
 
     work = Path(work_dir).expanduser().resolve()
@@ -54,7 +54,7 @@ def extract_embeddings_with_scgpt(
         adata_preproc.obsm["X_scgpt"] = adata_emb.X.copy()
         adata_preproc.write(emb_path)
     except Exception as exc:
-        raise RuntimeError(f"scGPT embedding extraction failed: {exc}")from exc
+        raise RuntimeError(f"scGPT embedding extraction failed: {exc}") from exc
 
     return json.dumps(
         {

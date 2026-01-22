@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # 主服务
+  genomix-main:
+    build:
+      context: .
+      dockerfile: Dockerfile.main
+    container_name: genomix-main
+    ports:
+      - "8000:8000"
+    environment:
+      - SCGPT_SERVICE_URL=http://genomix-scgpt:8001
+      - GENOMIX_AGENT_API=http://localhost:8000
+    volumes:
+      - ./data:/app/data
+      - ./uploaded_data:/app/uploaded_data
+    depends_on:
+      - genomix-scgpt
+    networks:
+      - genomix-network
+    restart: unless-stopped
+
+  # scGPT 服务
+  genomix-scgpt:
+    build:
+      context: .
+      dockerfile: Dockerfile.scgpt
+    container_name: genomix-scgpt
+    ports:
+      - "8001:8001"
+    environment:
+      - SCGPT_SERVICE_PORT=8001
+    volumes:
+      - ./data:/app/data
+      - ./uploaded_data:/app/uploaded_data
+    networks:
+      - genomix-network
+    restart: unless-stopped
+    # scGPT 可能需要 GPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+networks:
+  genomix-network:
+    driver: bridge

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from langchain_core.tools import tool
+from src.tools.artifact_paths import resolve_artifact_dir
 from pydantic import BaseModel, Field
 
 import numpy as np
@@ -609,7 +610,10 @@ class PseudotimeFactory:
 
 class PseudotimeAnalysisArgs(BaseModel):
     file_path: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
-    work_dir: str = Field(..., description="Work directory where pseudotime outputs will be written.")
+    work_dir: Optional[str] = Field(
+        default=None,
+        description="Work directory where pseudotime outputs will be written.",
+    )
     celltype_col: str = Field(default="pred_celltype", description="Column in AnnData.obs containing cell type annotations.")
     root_cell: Optional[str] = Field(default=None, description="Cell identifier to use as the pseudotime root.")
     root_celltype: Optional[str] = Field(default=None, description="Cell type label used to select the pseudotime root cell.")
@@ -625,7 +629,7 @@ class PseudotimeAnalysisArgs(BaseModel):
 @tool("run_pseudotime_analysis", args_schema=PseudotimeAnalysisArgs)
 def run_pseudotime_analysis(
     file_path: str,
-    work_dir: str,
+    work_dir: Optional[str] = None,
     celltype_col: str = "pred_celltype",
     root_cell: Optional[str] = None,
     root_celltype: Optional[str] = None,
@@ -643,11 +647,23 @@ def run_pseudotime_analysis(
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    work_path = Path(work_dir).expanduser().resolve()
-    work_path.mkdir(parents=True, exist_ok=True)
-    outdir = work_path / "pseudotime"
+    work_path = resolve_artifact_dir(
+        input_path=input_path,
+        work_dir=work_dir,
+        subdir="pseudotime",
+    )
+    outdir = work_path
 
     analyzer = PseudotimeAnalyzer()
+    adata_preview = sc.read_h5ad(str(input_path))
+    if celltype_col not in adata_preview.obs.columns:
+        if "cell_type" in adata_preview.obs.columns:
+            celltype_col = "cell_type"
+        elif "pred_celltype" in adata_preview.obs.columns:
+            celltype_col = "pred_celltype"
+        else:
+            raise ValueError(f"AnnData.obs 不包含列 '{celltype_col}'")
+
     result = analyzer.run(
         file_path=str(input_path),
         celltype_col=celltype_col,

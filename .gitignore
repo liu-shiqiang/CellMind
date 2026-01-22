@@ -1,31 +1,99 @@
-
-# IDE
+# ====================
+# IDE & Editor
+# ====================
 .vscode/
-
-# ignore model files
-test/
-save/
-
-# ignore log files
-logs/
-
-# ignore cache files
-__pycache__/
-
-# ignore output files
-output/
-
-test.py
-
-data/
-
-chroma_data/
-
-tests/
-
-uploaded_data/
-
-# macOS
-.DS_Store
+.idea/
 *.swp
 *.swo
+*~
+
+# ====================
+# Python
+# ====================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.coverage
+htmlcov/
+
+# ====================
+# Jupyter Notebook
+# ====================
+.ipynb_checkpoints/
+*.ipynb
+
+# ====================
+# Data & Models
+# ====================
+test/
+save/
+data/
+chroma_data/
+uploads/
+*.h5ad
+*.h5ad
+
+# ====================
+# Database
+# ====================
+*.db
+*.db-shm
+*.db-wal
+cellmind.db
+
+# ====================
+# Logs & Output
+# ====================
+logs/
+*.log
+output/
+runs/
+*.log.*
+
+# ====================
+# Temporary Files
+# ====================
+temp_*.py
+thesis/
+
+# ====================
+# Node.js (Frontend)
+# ====================
+cellmind/node_modules/
+cellmind/dist/
+
+# ====================
+# macOS
+# ====================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ====================
+# Claude Code
+# ====================
+.claude/
+docs/

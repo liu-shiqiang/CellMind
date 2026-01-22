@@ -1,0 +1,340 @@
+"""
+计划生成节点
+根据用户意图和可用工具生成执行计划
+包含完整的重试机制和错误处理
+"""
+import json
+import logging
+from typing import List
+
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.exceptions import OutputParserException
+from pydantic import ValidationError
+
+from src.agent.state import AgentState, Plan
+from src.agent.tool_registry import TOOLS, get_tool_registry
+from src.utils.llm_manager import get_llm
+from src.utils.path_manager import create_analysis_work_dir
+
+logger = logging.getLogger(__name__)
+
+# ============== 工具步骤标签 ==============
+
+TOOL_STEP_LABELS: dict = {
+    # 单细胞核心工具
+    "load_h5ad_data": "加载与预处理数据",
+    "calculate_qc_metrics": "质量控制分析",
+    "normalize_and_hvg": "标准化与高变基因识别",
+    "pca_reduction": "主成分分析降维",
+    "cluster_and_umap": "聚类与UMAP可视化",
+    "find_marker_genes": "标记基因识别",
+    "annotate_cells": "细胞类型注释",
+    "differential_expression": "差异表达分析",
+    "generate_analysis_report": "生成分析报告",
+    # 高级工具
+    "extract_embeddings_with_scgpt": "提取 scGPT 嵌入",
+    # 兼容旧工具
+    "cluster_and_diff": "聚类与差异分析",
+    "annotate_with_markers": "细胞类型注释",
+    "interpret_cluster_results": "聚类功能解读",
+    "interpret_celltype_results": "细胞类型叙述生成",
+    "run_ssgsea_enrichment": "ssGSEA 富集分析",
+    "dataset_bio_qa": "知识库问答总结",
+}
+
+
+# ============== 辅助函数 ==============
+
+def _identify_tool_from_plan_step(step: str) -> str | None:
+    """从计划步骤中识别工具名称"""
+    lowered = step.lower()
+    # 优先匹配新的单细胞核心工具
+    for tool_name in (
+        "load_h5ad_data",
+        "calculate_qc_metrics",
+        "normalize_and_hvg",
+        "pca_reduction",
+        "cluster_and_umap",
+        "find_marker_genes",
+        "annotate_cells",
+        "differential_expression",
+        "generate_analysis_report",
+        "extract_embeddings_with_scgpt",
+        # 兼容旧工具
+        "cluster_and_diff",
+        "annotate_with_markers",
+        "interpret_cluster_results",
+        "interpret_celltype_results",
+        "run_ssgsea_enrichment",
+    ):
+        if tool_name in lowered:
+            return tool_name
+    return None
+
+
+def _is_tool_already_completed(dataset_entry: dict, tool_name: str) -> bool:
+    """检查工具是否已在当前数据集上完成"""
+    if not dataset_entry:
+        return False
+
+    # 新的单细胞核心工具
+    if tool_name == "load_h5ad_data":
+        return bool(dataset_entry.get("loaded_path") or dataset_entry.get("preprocessed_path"))
+    if tool_name == "calculate_qc_metrics":
+        return bool(dataset_entry.get("qc_path"))
+    if tool_name == "normalize_and_hvg":
+        return bool(dataset_entry.get("normalized_path"))
+    if tool_name == "pca_reduction":
+        return bool(dataset_entry.get("pca_path"))
+    if tool_name == "cluster_and_umap":
+        return bool(dataset_entry.get("clustered_path"))
+    if tool_name == "find_marker_genes":
+        return bool(dataset_entry.get("markers_path"))
+    if tool_name == "annotate_cells":
+        return bool(dataset_entry.get("annotated_path"))
+    if tool_name == "differential_expression":
+        return bool(dataset_entry.get("de_path"))
+    if tool_name == "generate_analysis_report":
+        reports = dataset_entry.get("reports", {})
+        return bool(reports.get("analysis_report"))
+
+    # 高级工具
+    if tool_name == "extract_embeddings_with_scgpt":
+        return bool(dataset_entry.get("embeddings_path"))
+
+    # 兼容旧工具
+    if tool_name == "cluster_and_diff":
+        return bool(dataset_entry.get("clustered_path") and dataset_entry.get("diff_gene_path"))
+    if tool_name == "annotate_with_markers":
+        return bool(
+            dataset_entry.get("annotated_path") or dataset_entry.get("annotation", {}).get("result_path")
+        )
+    if tool_name == "interpret_cluster_results":
+        interpretation = dataset_entry.get("interpretation", {})
+        return bool(interpretation.get("dataset_report") or interpretation.get("clusters"))
+    if tool_name == "interpret_celltype_results":
+        report = dataset_entry.get("celltype_report", {})
+        return bool(report.get("report_path") or report.get("celltype_context_path"))
+    if tool_name == "run_ssgsea_enrichment":
+        enrichment = dataset_entry.get("enrichment", {}).get("ssgsea", {})
+        return bool(enrichment.get("result_paths") or enrichment.get("status"))
+    return False
+
+
+def _get_active_dataset_entry(state: AgentState) -> tuple[str | None, dict | None]:
+    """获取当前活动的数据集条目"""
+    project_state = state.get("project_state") or {}
+    datasets = project_state.get("datasets") or {}
+    dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset")
+    entry: dict | None = None
+    if dataset_id and isinstance(datasets.get(dataset_id), dict):
+        entry = datasets[dataset_id]
+    return dataset_id, entry
+
+
+def _prune_completed_plan(state: AgentState) -> None:
+    """从计划中移除已完成的步骤"""
+    dataset_id, dataset_entry = _get_active_dataset_entry(state)
+
+    if not dataset_entry:
+        return
+
+    plan = state.get("plan") or []
+    if not plan:
+        return
+
+    filtered_steps: List[str] = []
+    pruned = False
+    for step in plan:
+        if not isinstance(step, str):
+            filtered_steps.append(step)
+            continue
+        tool_name = _identify_tool_from_plan_step(step)
+        if tool_name and _is_tool_already_completed(dataset_entry, tool_name):
+            logger.info(
+                "[General Planner] Skipping completed step '%s' for dataset '%s'",
+                tool_name,
+                dataset_id,
+            )
+            pruned = True
+            continue
+        filtered_steps.append(step)
+
+    if pruned:
+        state["plan"] = filtered_steps
+
+
+# ============== 计划生成节点 ==============
+
+async def general_planner(state: AgentState) -> AgentState:
+    """
+    通用规划节点
+    根据意图和可用工具动态生成执行计划
+    支持重试机制和错误恢复
+    """
+    logger.info("[General Planner] Starting planning based on user intent")
+    input_files = state.get("input_files", [])
+
+    # 创建工作目录
+    if input_files and "input_file_info" in state:
+        first_file_info = state["input_file_info"][0]
+        base_name = first_file_info["file_name"].replace('.h5ad', '')
+        work_dir = create_analysis_work_dir(base_name)
+        state["work_dir"] = str(work_dir)
+        logger.info(f"[General Planner] Created working directory: {work_dir}")
+
+    # 获取工具注册表和工具描述
+    tool_registry = get_tool_registry()
+    tools_info = tool_registry.get_tool_description_for_llm()
+
+    plan_prompt_template = """
+For the previously analyzed user intent, come up with a simple step by step plan.
+Users may have multiple intentions, and a plan should be generated for each intention, taking into account the dependencies between different intentions. The result of the previous step may be the input for the next step
+This plan should involve individual tasks, that if executed correctly will yield the correct answer. Do not add any superfluous steps.
+The result of the final step should be the final answer. Ensure that each task can be completed at the minimum task granularity, and the description of each step should be as detailed as possible - do not skip steps.
+
+{tools_info}
+
+To achieve this goal, you will be able to view the conversation history between users and yourself, as well as information on available tools.
+IMPORTANT:
+- You MUST generate a non-empty list of steps.
+- Each step should map to one of the available tools.
+- Steps must be in execution order.
+- Do not skip any essential step.
+"""
+
+    max_attempts = 3
+    plan_generation_success = False
+    previous_errors_feedback = ""
+
+    for attempt in range(max_attempts):
+        try:
+            llm = get_llm()
+            plan_llm = llm.with_structured_output(Plan)
+
+            plan_prompt = plan_prompt_template.format(tools_info=tools_info)
+
+            logger.info(f"[General Planner] Attempting to generate plan (Attempt {attempt + 1}/{max_attempts})")
+
+            if attempt > 0 and previous_errors_feedback:
+                feedback_prompt = f"""
+IMPORTANT FEEDBACK FROM PREVIOUS ATTEMPT (Attempt {attempt + 1}):
+The plan generated in the previous attempt had the following issues:
+{previous_errors_feedback}
+
+Please carefully review the feedback above and regenerate the plan, ensuring it adheres strictly to the required JSON format and content guidelines.
+"""
+                plan_prompt = plan_prompt + "\n\n" + feedback_prompt
+
+            state["messages"].append(HumanMessage(content=plan_prompt))
+
+            plan_messages = state["messages"]
+            plan = plan_llm.invoke(plan_messages)
+            logger.info(f"[General Planner] Plan generation result: {plan}")
+
+            if plan and isinstance(plan.steps, list) and len(plan.steps) > 0:
+                # 检查步骤是否非空
+                non_empty_steps = [step for step in plan.steps if step.strip()]
+                if non_empty_steps:
+                    tool_names = []
+                    for step in non_empty_steps:
+                        tool_name = _identify_tool_from_plan_step(step)
+                        if tool_name:
+                            tool_names.append(tool_name)
+                    validation = tool_registry.validate_plan(tool_names)
+                    logger.info("[General Planner] Planned tools: %s", tool_names)
+                    if not validation["valid"]:
+                        previous_errors_feedback = "Plan uses unavailable tools: " + ", ".join(validation["errors"])
+                        logger.warning("[General Planner] %s", previous_errors_feedback)
+                        continue
+                    plan_generation_success = True
+                    state["plan"] = non_empty_steps
+                    _prune_completed_plan(state)
+                    current_plan = state.get("plan", [])
+                    if not current_plan:
+                        logger.info(
+                            "[General Planner] All proposed steps already completed; skipping execution."
+                        )
+                        state["messages"].append(
+                            AIMessage(
+                                content="<PLAN_GENERATED>\n{\n  \"steps\": []\n}\n</PLAN_GENERATED>"
+                            )
+                        )
+                        state["next_step"] = "response"
+                        return state
+                    logger.info("[General Planner] Plan generated successfully.")
+                    previous_errors_feedback = ""
+                    break
+                else:
+                    error_msg = "Plan generation produced an object but steps list is invalid or empty."
+                    logger.warning(f"[General Planner] All steps are empty (Attempt {attempt + 1}).")
+                    previous_errors_feedback = error_msg
+            else:
+                error_msg = "Plan generation produced an object but steps list is invalid or empty."
+                logger.warning(f"[General Planner] Plan generation failed or produced empty plan (Attempt {attempt + 1}).")
+                previous_errors_feedback = error_msg
+
+        except ValidationError as e:
+            error_details = str(e)
+            logger.error(f"[General Planner] Pydantic validation error (Attempt {attempt + 1}): {error_details}")
+
+            feedback_msg = f"ValidationError: The output JSON structure was incorrect. Details: {error_details}. "
+            feedback_msg += "Please ensure your response is a valid JSON object with a 'steps' key that is an array of non-empty strings, matching the provided Pydantic model exactly."
+            previous_errors_feedback = feedback_msg
+
+        except OutputParserException as e:
+            error_details = str(e)
+            logger.error(f"[General Planner] Output parsing error (Attempt {attempt + 1}): {error_details}")
+
+            feedback_msg = f"OutputParserException: Failed to parse the LLM output. Details: {error_details}. "
+            feedback_msg += "Please make sure your response is a clean JSON object that strictly follows the specified format, with no extra text, markdown, or explanations."
+            previous_errors_feedback = feedback_msg
+
+        except Exception as e:
+            error_type = type(e).__name__
+            error_details = str(e)
+            logger.error(f"[General Planner] Unexpected error (Attempt {attempt + 1}): {error_type}: {error_details}")
+
+            feedback_msg = f"Unexpected Error ({error_type}): {error_details}. "
+            if "timeout" in error_type.lower() or "timeout" in error_details.lower():
+                feedback_msg += "The previous attempt timed out. Please try generating a more concise plan or break down complex steps further."
+            else:
+                feedback_msg += "An unexpected error occurred. Please try regenerating the plan, ensuring it's a valid JSON object."
+            previous_errors_feedback = feedback_msg
+
+    # 根据生成结果决定下一步
+    if plan_generation_success and state.get("plan"):
+        plan_model = Plan(steps=state["plan"])
+        plan_json_str = plan_model.model_dump_json(indent=2)
+        plan_message_content = f"<PLAN_GENERATED>\n{plan_json_str}\n</PLAN_GENERATED>"
+        state["messages"].append(AIMessage(content=plan_message_content))
+        state["next_step"] = "general_executor"
+    else:
+        error_msg = f"Failed to generate a valid plan after {max_attempts} attempts. Final error feedback: {previous_errors_feedback}"
+        logger.error(f"[General Planner] {error_msg}")
+        state["messages"].append(AIMessage(content=f"<PLAN_ERROR>{error_msg}</PLAN_ERROR>"))
+        state["next_step"] = "response"
+
+    return state
+
+
+# ============== 导出函数供其他模块使用 ==============
+
+def get_tool_step_label(tool_name: str) -> str:
+    """获取工具的中文标签"""
+    return TOOL_STEP_LABELS.get(tool_name, tool_name)
+
+
+def identify_tool_from_step(step: str) -> str | None:
+    """从步骤描述中识别工具名称"""
+    return _identify_tool_from_plan_step(step)
+
+
+def is_tool_completed(dataset_entry: dict, tool_name: str) -> bool:
+    """检查工具是否已完成"""
+    return _is_tool_already_completed(dataset_entry, tool_name)
+
+
+def prune_completed_steps(state: AgentState) -> None:
+    """从计划中移除已完成的步骤"""
+    _prune_completed_plan(state)

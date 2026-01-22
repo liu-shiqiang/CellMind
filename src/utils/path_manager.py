@@ -31,7 +31,7 @@ class PathInfo:
 class PathManager:
     """统一路径管理器"""
     
-    def __init__(self, base_output_dir: str = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/test_output"):
+    def __init__(self, base_output_dir: str = "./runs"):
         self.base_output_dir = Path(base_output_dir).expanduser().resolve()
         self.base_output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -143,6 +143,68 @@ class PathManager:
         
         logger.info(f"文件验证通过: {path_str}")
         return path_info
+        
+    def validate_input_files(file_paths: List[str]) -> List[str]:
+        """
+        验证输入文件列表
+        
+        Args:
+            file_paths: 文件路径列表
+            
+        Returns:
+            验证通过的文件路径列表
+            
+        Raises:
+            FileNotFoundError: 文件不存在或格式不正确
+        """
+        validated_files = []
+        
+        for file_path in file_paths:
+            try:
+                path_info = validate_h5ad_file(file_path)
+                print(path_info)
+                validated_files.append(str(path_info.resolved_path))
+                print(f"Validation Documentation: {path_info.file_name} ({path_info.size})")
+            except Exception as e:
+                print(f"File verification failed: {file_path} - {e}")
+                raise FileNotFoundError(f"File verification failed: {file_path}")
+        
+        return validated_files
+
+    def get_files_interactively() -> List[str]:
+        """
+        交互式获取文件路径
+        
+        Returns:
+            文件路径列表
+        """
+        files = []
+        print("Please enter the file path (You can enter multiple files.'done' to complete, 'q' to exit):")
+        
+        while True:
+            file_path = input(f"file {len(files) + 1}: ").strip()
+            
+            if file_path.lower() == 'q':
+                print("User cancels operation")
+                return []
+            
+            if file_path.lower() == 'done':
+                if not files:
+                    print("Please enter at least one file path")
+                    continue
+                break
+            
+            if file_path:
+                try:
+                    path_info = validate_h5ad_file(file_path)
+                    files.append(str(path_info.resolved_path))
+                    print(f"add file: {path_info.file_name}")
+                except Exception as e:
+                    print(f"Invalid file: {e}")
+                    print("Please re-enter or enter 'q' to exit")
+        
+        return files
+
     
     def create_work_dir(self, base_name: str, task_type: str = "analysis") -> Path:
         """

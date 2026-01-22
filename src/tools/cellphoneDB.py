@@ -14,15 +14,18 @@ import scanpy as sc
 from pydantic import BaseModel, Field, ValidationError
 
 from langchain_core.tools import tool
+from src.tools.artifact_paths import resolve_artifact_dir
 
 # CPDB core
 from cellphonedb.src.core.methods import cpdb_statistical_analysis_method
 
-# settings（可选）
+# settings（从项目配置读取）
 try:
-    from config.setting import settings  # 可能包含 CELLPHONEDB_ZIP
+    from src.web.config import settings
+    CELLPHONEDB = settings.CELLPHONEDB_DB_PATH
 except Exception:
-    settings = None  # type: ignore
+    # 回退到相对路径
+    CELLPHONEDB = "./data/cellphonedb/cellphonedb.zip"
 
 # 非交互后端
 import matplotlib
@@ -31,10 +34,6 @@ import matplotlib.pyplot as plt
 
 # ktplotspy
 import ktplotspy as kpy
-
-
-# ==== 修改为你的数据库 zip ====
-CELLPHONEDB = "/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/data/cellphonedb/cellphonedb.zip"
 
 
 # -----------------------------
@@ -253,7 +252,11 @@ def run_cellphonedb_core(
     if not input_path.exists():
         raise FileNotFoundError(f"输入文件不存在: {input_path}")
 
-    base_dir = Path(work_dir).expanduser().resolve() if work_dir else (input_path.parent / "cellphonedb_results")
+    base_dir = resolve_artifact_dir(
+        input_path=input_path,
+        work_dir=work_dir,
+        subdir="cellphonedb",
+    )
     _ensure_directory(base_dir)
     input_dir = _ensure_directory(base_dir / "inputs")
     output_dir = _ensure_directory(base_dir / "outputs")
@@ -261,7 +264,12 @@ def run_cellphonedb_core(
     # 1) 准备输入
     adata = sc.read_h5ad(str(input_path))
     if celltype_column not in adata.obs:
-        raise ValueError(f"AnnData.obs 不包含列 '{celltype_column}'")
+        if celltype_column != "cell_type" and "cell_type" in adata.obs:
+            celltype_column = "cell_type"
+        elif celltype_column != "pred_celltype" and "pred_celltype" in adata.obs:
+            celltype_column = "pred_celltype"
+        else:
+            raise ValueError(f"AnnData.obs 不包含列 '{celltype_column}'")
 
     counts_df = _to_dense_frame(adata)
     (input_dir / "counts.txt").write_text(
@@ -469,8 +477,8 @@ def run_cellphonedb_core(
 if __name__ == "__main__":
     try:
         args = CellphoneDBArgs(
-            file_path="/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/test_l3_stratified_5pct/test_l3_stratified_5pct_annotated.h5ad",
-            work_dir="/home/share/huadjyin/home/liushiqiang/Projects/genomix-agent/output/cellphonedb",
+            file_path="./runs/c_data.h5ad",  # 测试数据路径
+            work_dir="./runs/cellphonedb",
             celltype_column="pred_celltype",
             database_path=CELLPHONEDB,
             counts_data="hgnc_symbol",

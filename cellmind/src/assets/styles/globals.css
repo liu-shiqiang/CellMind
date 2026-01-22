@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* Custom styles */
+body {
+  background-color: white;
+  color: rgb(15 23 42);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* 玻璃态面板 */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(16px);
+  border: 1px solid #e2e8f0;
+}
+
+/* 消息气泡 */
+.message-bubble {
+  padding: 1rem 1.5rem;
+  border-radius: 1.5rem;
+}
+
+.message-user {
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  color: #1e293b;
+}
+
+.message-assistant {
+  color: #1e293b;
+  font-weight: 500;
+}

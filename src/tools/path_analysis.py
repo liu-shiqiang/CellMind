@@ -4,9 +4,11 @@ import pandas as pd
 import numpy as np
 import os
 import json
+from pathlib import Path
 import matplotlib.pyplot as plt
 from pydantic import BaseModel, Field
 from config.setting import settings
+from src.tools.artifact_paths import resolve_artifact_dir
 import argparse
 
 import gseapy as gp
@@ -22,7 +24,7 @@ class PathwayArgs(BaseModel):
 
 
 @tool("pathway_analysis", return_direct=False, args_schema=PathwayArgs)
-def pathway_analysis(method: str, input_file: str, geneset: str = "KEGG") -> dict:
+def pathway_analysis(method: str, input_file: str, geneset: str = "KEGG") -> str:
     """
     在输入表达数据上执行通路富集分析。
     支持方法:  GSEA, ssGSEA, GSVA, GO富集, KEGG富集。
@@ -45,12 +47,20 @@ def pathway_analysis(method: str, input_file: str, geneset: str = "KEGG") -> dic
     else:
         raise ValueError(f"不支持的分析方法: {method}")
     
-    with open(os.path.join(settings.OUTPUT_DIR, "pathway_analysis.json"), "w") as f:
-        json.dump({
-            "method": method,
-            "top_terms": res.top_terms.to_dict(orient="records") if hasattr(res.top_terms, 'to_dict') else res.top_terms,
-            "pvalues": res.pvalues,
-        }, f, indent=4)
+    input_path = Path(input_file).expanduser().resolve()
+    out_dir = resolve_artifact_dir(input_path=input_path, subdir="pathway_analysis")
+    result_path = out_dir / "pathway_analysis.json"
+    payload = {
+        "status": "success",
+        "method": method,
+        "top_terms": res.top_terms.to_dict(orient="records") if hasattr(res.top_terms, 'to_dict') else res.top_terms,
+        "pvalues": res.pvalues,
+        "result_path": str(result_path),
+    }
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=4, ensure_ascii=False)
+
+    return json.dumps(payload, ensure_ascii=False)
         
     # # 3. 构建并返回结果字典
     # return json.dumps({
