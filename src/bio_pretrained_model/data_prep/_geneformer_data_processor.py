@@ -186,11 +186,21 @@ class GeneformerDataProcessor(SCRNAInputDataProcessorBase):
             self.adata.X = self.adata.raw[:, self.adata.var_names].X.copy()
             # to reduce the adata size
             self.adata.raw = None
-        
+
+        # 修复 index name 与列名冲突问题
+        if self.adata.var.index.name is not None:
+            index_name = self.adata.var.index.name
+            if index_name in self.adata.var.columns:
+                if not (self.adata.var[index_name] == self.adata.var.index).all():
+                    logger.warning(f"var.index.name '{index_name}' conflicts with column name. Resetting to None.")
+                    self.adata.var.index.name = None
+        if self.adata.obs.index.name is not None:
+            self.adata.obs.index.name = None
+
         # QC
-        sc.pp.calculate_qc_metrics(self.adata, 
-                                   percent_top=None, 
-                                   log1p=False, 
+        sc.pp.calculate_qc_metrics(self.adata,
+                                   percent_top=None,
+                                   log1p=False,
                                    inplace=True,
                                    use_raw=False,
                                    layer=None)

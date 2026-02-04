@@ -28,11 +28,19 @@ TOOL_STEP_LABELS: dict = {
     "pca_reduction": "主成分分析降维",
     "cluster_and_umap": "聚类与UMAP可视化",
     "find_marker_genes": "标记基因识别",
-    "annotate_cells": "细胞类型注释",
+    "annotate_cells": "智能细胞类型注释",
+    "annotate_with_simple_markers": "简单标记基因注释",
+    "annotate_with_cima_markers": "CIMA标记基因注释",
+    "annotate_with_blood_markers": "血液细胞标记注释",
+    "annotate_with_llm": "LLM智能细胞注释",
     "differential_expression": "差异表达分析",
     "generate_analysis_report": "生成分析报告",
     # 高级工具
     "extract_embeddings_with_scgpt": "提取 scGPT 嵌入",
+    "run_cellphonedb_core": "CellPhoneDB细胞通讯分析",
+    "run_pseudotime_analysis": "伪时间轨迹分析",
+    "run_ora_enrichment": "ORA富集分析",
+    "generate_comprehensive_report": "生成综合报告",
     # 兼容旧工具
     "cluster_and_diff": "聚类与差异分析",
     "annotate_with_markers": "细胞类型注释",
@@ -46,9 +54,18 @@ TOOL_STEP_LABELS: dict = {
 # ============== 辅助函数 ==============
 
 def _identify_tool_from_plan_step(step: str) -> str | None:
-    """从计划步骤中识别工具名称"""
+    """从计划步骤中识别工具名称
+
+    支持通过以下方式识别:
+    1. 英文工具名称直接匹配
+    2. 中文标签匹配 (TOOL_STEP_LABELS)
+    """
+    if not isinstance(step, str):
+        return None
+
     lowered = step.lower()
-    # 优先匹配新的单细胞核心工具
+
+    # 首先尝试直接匹配英文工具名称
     for tool_name in (
         "load_h5ad_data",
         "calculate_qc_metrics",
@@ -57,9 +74,17 @@ def _identify_tool_from_plan_step(step: str) -> str | None:
         "cluster_and_umap",
         "find_marker_genes",
         "annotate_cells",
+        "annotate_with_simple_markers",
+        "annotate_with_cima_markers",
+        "annotate_with_blood_markers",
+        "annotate_with_llm",
         "differential_expression",
         "generate_analysis_report",
+        "generate_comprehensive_report",
         "extract_embeddings_with_scgpt",
+        "run_cellphonedb_core",
+        "run_pseudotime_analysis",
+        "run_ora_enrichment",
         # 兼容旧工具
         "cluster_and_diff",
         "annotate_with_markers",
@@ -69,6 +94,36 @@ def _identify_tool_from_plan_step(step: str) -> str | None:
     ):
         if tool_name in lowered:
             return tool_name
+
+    # 尝试通过中文标签匹配
+    for tool_name, label in TOOL_STEP_LABELS.items():
+        if label in step:
+            return tool_name
+
+    # 关键词匹配
+    if '标记基因' in step or 'marker' in lowered:
+        return 'find_marker_genes'
+    if '聚类' in step and 'umap' in lowered:
+        return 'cluster_and_umap'
+    if 'pca' in lowered or '主成分' in step:
+        return 'pca_reduction'
+    if '注释' in step and 'cima' in lowered:
+        return 'annotate_with_cima_markers'
+    if '注释' in step and '血液' in step:
+        return 'annotate_with_blood_markers'
+    if '注释' in step and '简单' in step:
+        return 'annotate_with_simple_markers'
+    if '注释' in step or 'annotate' in lowered:
+        return 'annotate_cells'  # 智能注释工具
+    if '质控' in step or 'qc' in lowered:
+        return 'calculate_qc_metrics'
+    if '标准化' in step or 'hvg' in lowered:
+        return 'normalize_and_hvg'
+    if '报告' in step or 'report' in lowered:
+        return 'generate_analysis_report'
+    if '差异' in step or 'de' in lowered:
+        return 'differential_expression'
+
     return None
 
 
@@ -91,6 +146,8 @@ def _is_tool_already_completed(dataset_entry: dict, tool_name: str) -> bool:
     if tool_name == "find_marker_genes":
         return bool(dataset_entry.get("markers_path"))
     if tool_name == "annotate_cells":
+        return bool(dataset_entry.get("annotated_path"))
+    if tool_name in ("annotate_with_simple_markers", "annotate_with_cima_markers", "annotate_with_blood_markers", "annotate_with_llm"):
         return bool(dataset_entry.get("annotated_path"))
     if tool_name == "differential_expression":
         return bool(dataset_entry.get("de_path"))
@@ -162,6 +219,80 @@ def _prune_completed_plan(state: AgentState) -> None:
 
     if pruned:
         state["plan"] = filtered_steps
+
+
+def _inject_missing_dependencies(state: AgentState) -> None:
+    """自动注入缺失的依赖步骤到计划中
+
+    确保计划中的每个工具的依赖都已满足，如果依赖步骤不在计划中且未完成，
+    则自动将其插入到正确的位置。
+    """
+    plan = state.get("plan") or []
+    if not plan:
+        return
+
+    _, dataset_entry = _get_active_dataset_entry(state)
+    tool_registry = get_tool_registry()
+
+    # 获取依赖关系映射
+    deps_map = tool_registry.TOOL_DEPENDENCIES
+
+    # 构建已完成工具集合
+    completed = set()
+    if dataset_entry:
+        completed_steps = dataset_entry.get("completed_steps") or []
+        completed = set(completed_steps)
+
+    # 构建计划中的工具集合（保持顺序）
+    plan_tools = []
+    for step in plan:
+        tool_name = _identify_tool_from_plan_step(step)
+        if tool_name:
+            plan_tools.append(tool_name)
+
+    # 找出需要注入的依赖工具
+    injected_tools = []
+    final_plan_tools = []
+
+    for tool in plan_tools:
+        # 获取工具的依赖
+        deps = deps_map.get(tool, [])
+
+        # 检查每个依赖是否满足
+        for dep in deps:
+            # 如果依赖不在已完成集合中，也不在计划中，需要注入
+            if dep not in completed and dep not in final_plan_tools and dep not in plan_tools:
+                # 递归检查依赖的依赖
+                dep_deps = deps_map.get(dep, [])
+                for dep_dep in reversed(dep_deps):
+                    if dep_dep not in completed and dep_dep not in final_plan_tools and dep_dep not in plan_tools:
+                        final_plan_tools.append(dep_dep)
+                final_plan_tools.append(dep)
+                injected_tools.append(dep)
+
+        final_plan_tools.append(tool)
+
+    if injected_tools:
+        logger.info(f"[Planner] 自动注入缺失的依赖步骤: {injected_tools}")
+
+        # 重建计划步骤
+        new_plan = []
+        tool_to_step = {}
+        for step in plan:
+            tool_name = _identify_tool_from_plan_step(step)
+            if tool_name:
+                tool_to_step[tool_name] = step
+
+        for tool in final_plan_tools:
+            if tool in tool_to_step:
+                new_plan.append(tool_to_step[tool])
+            else:
+                # 为注入的工具生成步骤描述
+                step_label = TOOL_STEP_LABELS.get(tool, tool)
+                new_plan.append(f"{step_label}")
+
+        state["plan"] = new_plan
+        logger.info(f"[Planner] 依赖注入后的计划: {new_plan}")
 
 
 # ============== 计划生成节点 ==============
@@ -249,6 +380,8 @@ Please carefully review the feedback above and regenerate the plan, ensuring it 
                         continue
                     plan_generation_success = True
                     state["plan"] = non_empty_steps
+                    # 自动注入缺失的依赖步骤
+                    _inject_missing_dependencies(state)
                     _prune_completed_plan(state)
                     current_plan = state.get("plan", [])
                     if not current_plan:

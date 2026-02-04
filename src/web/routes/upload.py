@@ -172,3 +172,32 @@ async def cleanup_expired_files():
         "cleaned": len(expired),
         "file_ids": expired
     }
+
+
+@router.get("/{file_id}/preview")
+async def get_file_preview(file_id: str):
+    """
+    获取H5AD文件详细预览
+
+    返回数据的统计信息和预览内容，包括：
+    - 细胞数量 (n_obs)
+    - 基因数量 (n_vars)
+    - 细胞元数据列 (obs_columns)
+    - 基因信息列 (var_columns)
+    - obs前5行预览
+    - var前5行预览
+    - layers列表
+    - obsm列表
+    """
+    file_service = get_file_service()
+    metadata = await file_service.get_file(file_id)
+
+    if not metadata:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    preview_data = await file_service.get_h5ad_preview(file_id)
+
+    if not preview_data:
+        raise HTTPException(status_code=400, detail="无法读取H5AD文件预览")
+
+    return preview_data

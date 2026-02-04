@@ -19,10 +19,38 @@ from src.tools.single_cell_core import (
     pca_reduction,
     cluster_and_umap,
     find_marker_genes,
-    annotate_cells,
     differential_expression,
     generate_analysis_report,
 )
+
+# 导入注释工具
+try:
+    from src.tools.annotation.marker_based import (
+        annotate_with_simple_markers,
+        annotate_with_cima_markers,
+        annotate_with_blood_markers,
+    )
+except Exception as exc:
+    annotate_with_simple_markers = None
+    annotate_with_cima_markers = None
+    annotate_with_blood_markers = None
+    logger.warning("Annotation tools unavailable: %s", exc)
+
+try:
+    from src.tools.annotation.llm_annotate import (
+        annotate_with_llm,
+    )
+except Exception as exc:
+    annotate_with_llm = None
+    logger.warning("LLM annotation tool unavailable: %s", exc)
+
+try:
+    from src.tools.annotation.smart_annotate import (
+        smart_annotate_cells,
+    )
+except Exception as exc:
+    smart_annotate_cells = None
+    logger.warning("Smart annotation tool unavailable: %s", exc)
 try:
     from src.tools.extract_embeddings_scgpt_client import extract_embeddings_with_scgpt
 except Exception as exc:  # pragma: no cover - optional dependency
@@ -69,7 +97,11 @@ class ToolRegistry:
     TOOL_DEPENDENCIES = {
         "cluster_and_umap": ["normalize_and_hvg", "pca_reduction"],
         "find_marker_genes": ["cluster_and_umap"],
-        "annotate_cells": ["find_marker_genes"],
+        "annotate_cells": ["find_marker_genes"],  # 智能注释工具（smart_annotate_cells）
+        "annotate_with_simple_markers": ["find_marker_genes"],
+        "annotate_with_cima_markers": ["find_marker_genes"],
+        "annotate_with_blood_markers": ["find_marker_genes"],
+        "annotate_with_llm": ["find_marker_genes"],
         "differential_expression": ["cluster_and_umap"],
         "generate_analysis_report": [],  # 不依赖其他工具
     }
@@ -82,7 +114,43 @@ class ToolRegistry:
         "pca_reduction",
         "cluster_and_umap",
         "find_marker_genes",
-        "annotate_cells",
+        "annotate_cells",  # 使用智能注释工具
+        "generate_analysis_report",
+    ]
+
+    # 细胞注释工作流（使用 CIMA 标记）
+    ANNOTATION_WORKFLOW_CIMA = [
+        "load_h5ad_data",
+        "calculate_qc_metrics",
+        "normalize_and_hvg",
+        "pca_reduction",
+        "cluster_and_umap",
+        "find_marker_genes",
+        "annotate_with_cima_markers",
+        "generate_analysis_report",
+    ]
+
+    # 血液样本注释工作流
+    ANNOTATION_WORKFLOW_BLOOD = [
+        "load_h5ad_data",
+        "calculate_qc_metrics",
+        "normalize_and_hvg",
+        "pca_reduction",
+        "cluster_and_umap",
+        "find_marker_genes",
+        "annotate_with_blood_markers",
+        "generate_analysis_report",
+    ]
+
+    # LLM 智能注释工作流（适用于复杂组织如脑组织）
+    ANNOTATION_WORKFLOW_LLM = [
+        "load_h5ad_data",
+        "calculate_qc_metrics",
+        "normalize_and_hvg",
+        "pca_reduction",
+        "cluster_and_umap",
+        "find_marker_genes",
+        "annotate_with_llm",
         "generate_analysis_report",
     ]
 
@@ -92,7 +160,8 @@ class ToolRegistry:
         "quality_control": ["calculate_qc_metrics"],
         "preprocessing": ["normalize_and_hvg", "pca_reduction"],
         "clustering": ["cluster_and_umap"],
-        "annotation": ["find_marker_genes", "annotate_cells"],
+        "marker_analysis": ["find_marker_genes"],
+        "annotation": ["annotate_cells", "annotate_with_simple_markers", "annotate_with_cima_markers", "annotate_with_blood_markers", "annotate_with_llm"],
         "analysis": ["differential_expression"],
         "advanced": ["extract_embeddings_with_scgpt"],
         "communication": ["run_cellphonedb_core"],
@@ -116,9 +185,22 @@ class ToolRegistry:
         self.register(pca_reduction)
         self.register(cluster_and_umap)
         self.register(find_marker_genes)
-        self.register(annotate_cells)
         self.register(differential_expression)
         self.register(generate_analysis_report)
+
+        # 智能注释工具（优先使用）
+        if smart_annotate_cells is not None:
+            self.register(smart_annotate_cells)
+
+        # 其他注释工具（保留作为备选）
+        if annotate_with_simple_markers is not None:
+            self.register(annotate_with_simple_markers)
+        if annotate_with_cima_markers is not None:
+            self.register(annotate_with_cima_markers)
+        if annotate_with_blood_markers is not None:
+            self.register(annotate_with_blood_markers)
+        if annotate_with_llm is not None:
+            self.register(annotate_with_llm)
 
         # 高级工具（可选）
         if extract_embeddings_with_scgpt is not None:
@@ -244,16 +326,18 @@ class ToolRegistry:
                 "cluster_and_umap",
                 "generate_analysis_report",
             ],
-            "cell_annotation": [
+            "cell_annotation": self.ANNOTATION_WORKFLOW_CIMA,
+            "cell_annotation_simple": [
                 "load_h5ad_data",
                 "calculate_qc_metrics",
                 "normalize_and_hvg",
                 "pca_reduction",
                 "cluster_and_umap",
                 "find_marker_genes",
-                "annotate_cells",
+                "annotate_with_simple_markers",
                 "generate_analysis_report",
             ],
+            "blood_annotation": self.ANNOTATION_WORKFLOW_BLOOD,
             "marker_gene_analysis": [
                 "load_h5ad_data",
                 "cluster_and_umap",

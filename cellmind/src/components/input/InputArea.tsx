@@ -8,8 +8,10 @@ import { Send, Plus, FileUp, Zap, AlertCircle } from 'lucide-react';
 import { useChatStore, useAgentStore, useAuthStore } from '@/stores';
 import { uploadService } from '@/services';
 import { FilePill } from './FilePill';
+import { DataPreviewDialog } from '@/components/data/DataPreviewDialog';
 import { useAgentStream, useChat } from '@/hooks';
 import type { UploadedFile, AnalysisReport, AgentStep } from '@/types';
+import type { PlotItem } from '@/components/analysis';
 
 interface InputAreaProps {
   onSendMessage?: (message: string) => void;
@@ -19,6 +21,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
   const [input, setInput] = useState('');
   const [showMenu, setShowMenu] = useState(false);
   const [showLoginPrompt, setShowLoginPrompt] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [collectedPlots, setCollectedPlots] = useState<PlotItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const { isAuthenticated, isAnonymous } = useAuthStore();
@@ -77,8 +82,25 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
       });
     },
     onToolResult: (tool, result) => {
-      // 更新工具步骤为完成
-      // TODO: 需要获取对应的step_id
+      // 检查result中是否有plots数组
+      if (result?.data?.plots && Array.isArray(result.data.plots)) {
+        setCollectedPlots(prev => [
+          ...prev,
+          ...result.data.plots.filter((p: PlotItem) =>
+            !prev.some(existing => existing.name === p.name)
+          ),
+        ]);
+      }
+      // 检查单个plot（多种可能的字段名）
+      const singlePlot = result?.data?.plot || result?.data?.heatmap_plot || result?.data?.annotated_umap_plot;
+      if (singlePlot) {
+        setCollectedPlots(prev => {
+          if (!prev.some(existing => existing.name === singlePlot.name)) {
+            return [...prev, singlePlot];
+          }
+          return prev;
+        });
+      }
     },
     onPlanUpdate: (plan) => {
       addStep({
@@ -99,9 +121,36 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
     },
     onComplete: (message) => {
       completeRun(message);
+
+      // 尝试从消息中提取报告内容
+      if (message && message.includes('## 🎉 分析完成')) {
+        // 提取报告标题和内容
+        const titleMatch = message.match(/# (.+)/);
+        const title = titleMatch ? titleMatch[1].trim() : '单细胞数据分析报告';
+
+        setReport({
+          id: `report_${Date.now()}`,
+          runId: runId || '',
+          title: title,
+          content: message,
+          summary: title,
+          sections: [],
+          createdAt: new Date(),
+          metadata: {},
+        });
+      }
+
+      // 如果有收集的plots，将其注入到消息中
+      let finalMessage = message;
+      if (collectedPlots.length > 0) {
+        // 将plots数据注入到消息中（JSON格式）
+        const plotsJson = JSON.stringify({ plots: collectedPlots });
+        finalMessage = `${message}\n\n\`\`\`json\n${plotsJson}\n\`\`\``;
+      }
+
       if (streamingMessageIdRef.current) {
         const messageId = streamingMessageIdRef.current;
-        streamingContentRef.current = message || streamingContentRef.current;
+        streamingContentRef.current = finalMessage || streamingContentRef.current;
         updateMessage(messageId, (current) => ({
           ...current,
           content: streamingContentRef.current || current.content,
@@ -116,12 +165,15 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
         }
         streamingMessageIdRef.current = null;
         streamingContentRef.current = '';
+        // 清空已收集的plots
+        setCollectedPlots([]);
       } else {
         saveMessage({
           sessionId: currentSessionId,
           role: 'assistant',
-          content: message,
+          content: finalMessage,
         });
+        setCollectedPlots([]);
       }
     },
     onError: (errorMsg) => {
@@ -138,6 +190,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
       setCurrentSession(sessionId);
       streamingMessageIdRef.current = null;
       streamingContentRef.current = '';
+      setCollectedPlots([]); // 清空之前的plots
       startRun({
         id: runId,
         sessionId,
@@ -314,6 +367,10 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    await handleFileUpload(file);
+  };
+
+  const handleFileUpload = async (file: File) => {
     // 验证文件
     const validation = uploadService.validateFile(file);
     if (!validation.valid) {
@@ -334,6 +391,30 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
     }
   };
 
+  // 拖拽事件处理
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      await handleFileUpload(file);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -342,7 +423,25 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
   };
 
   return (
-    <div className="p-8 bg-white border-t border-slate-100">
+    <div
+      className="p-8 bg-white border-t border-slate-100 relative"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* 拖拽上传遮罩 */}
+      {isDragging && (
+        <div className="absolute inset-0 bg-blue-500/10 backdrop-blur-sm z-50 flex items-center justify-center border-4 border-dashed border-blue-500 rounded-3xl m-4 animate-in fade-in duration-200">
+          <div className="text-center">
+            <div className="w-16 h-16 bg-blue-500 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-xl shadow-blue-200">
+              <FileUp size={32} className="text-white" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-800 mb-2">拖放以上传 H5AD 文件</h3>
+            <p className="text-slate-500">释放以上传您的单细胞数据</p>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-3xl mx-auto flex flex-col gap-3">
         {/* 错误提示 */}
         {agentError && (
@@ -353,7 +452,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
         )}
 
         {/* 已上传文件标签 */}
-        {uploadedFile && <FilePill file={uploadedFile} onRemove={removeFile} />}
+        {uploadedFile && <FilePill file={uploadedFile} onRemove={removeFile} onPreview={() => setShowPreview(true)} />}
 
         {/* 输入框 */}
         <form onSubmit={handleSend} className="relative">
@@ -491,6 +590,16 @@ export const InputArea: React.FC<InputAreaProps> = ({ onSendMessage }) => {
             </button>
           </div>
         </div>
+      )}
+
+      {/* 数据预览对话框 */}
+      {uploadedFile && (
+        <DataPreviewDialog
+          isOpen={showPreview}
+          fileId={uploadedFile.id}
+          fileName={uploadedFile.name}
+          onClose={() => setShowPreview(false)}
+        />
       )}
     </div>
   );

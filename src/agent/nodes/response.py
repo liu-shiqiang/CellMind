@@ -266,6 +266,38 @@ def _format_execution_summary(state: AgentState) -> Optional[str]:
     artifacts = [path for path in artifacts if isinstance(path, str)]
 
     lines: list[str] = []
+
+    # 检查是否有分析报告工具
+    has_report = "generate_analysis_report" in completed_tools
+    report_content = None
+
+    if has_report:
+        # 从工具历史中提取报告内容
+        for entry in tool_runs:
+            if entry.get("tool") == "generate_analysis_report":
+                try:
+                    import json
+                    result = entry.get("result")
+                    if isinstance(result, str):
+                        result = json.loads(result)
+                    if isinstance(result, dict):
+                        report_content = result.get("report_content") or result.get("report_markdown")
+                except:
+                    pass
+                break
+
+    # 如果有报告内容，优先显示
+    if report_content:
+        lines.append("## 🎉 分析完成！")
+        lines.append("")
+        lines.append(report_content)
+        if artifacts:
+            lines.append("")
+            lines.append("### 📁 产出文件:")
+            for path in artifacts:
+                lines.append(f"  • {path}")
+        return "\n".join(lines)
+
     if failed or execution_status == "failed":
         reason = failed.get("message") if failed else (state.get("error_info") or {}).get("detail")
         reason = reason or "执行过程中发生错误。"

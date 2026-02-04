@@ -327,6 +327,64 @@ class FileService:
         await self._save_metadata(metadata)
         return True
 
+    async def get_h5ad_preview(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """
+        获取H5AD文件详细预览
+
+        Args:
+            file_id: 文件ID
+
+        Returns:
+            包含预览数据的字典或None
+        """
+        try:
+            import anndata
+            import pandas as pd
+            import numpy as np
+
+            # 获取文件
+            file_content = await self.get_file_content(file_id)
+            if not file_content:
+                return None
+
+            metadata = await self.get_file(file_id)
+            if not metadata:
+                return None
+
+            # 创建临时文件
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.h5ad') as tmp:
+                tmp.write(file_content)
+                tmp.flush()
+
+                adata = anndata.read_h5ad(tmp.name)
+
+                # 构建预览数据
+                preview_data = {
+                    'n_obs': adata.n_obs,
+                    'n_vars': adata.n_vars,
+                    'obs_columns': list(adata.obs.columns),
+                    'var_columns': list(adata.var.columns),
+                    'obs_dtypes': {col: str(dtype) for col, dtype in adata.obs.dtypes.items()},
+                    'var_dtypes': {col: str(dtype) for col, dtype in adata.var.dtypes.items()},
+                    'layers': list(adata.layers.keys()) if hasattr(adata, 'layers') else [],
+                    'obsm_keys': list(adata.obsm.keys()) if hasattr(adata, 'obsm') else [],
+                    'obsm_shapes': {
+                        k: v.shape for k, v in adata.obsm.items()
+                    } if hasattr(adata, 'obsm') else {},
+                    # 前5行预览
+                    'obs_preview': adata.head(5).obs.to_dict(orient='records') if hasattr(adata, 'head') else adata.obs.iloc[:5].to_dict(orient='records'),
+                    'var_preview': adata.var.iloc[:5].to_dict(orient='records'),
+                    # 是否有原始数据
+                    'has_raw': adata.raw is not None if hasattr(adata, 'raw') else False,
+                }
+
+                return preview_data
+
+        except Exception as e:
+            print(f"[FileService] Error getting H5AD preview: {e}")
+            return None
+
 
 # ============== 全局单例 ==============
 

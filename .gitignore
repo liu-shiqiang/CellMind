@@ -97,3 +97,5 @@ cellmind/dist/
 # ====================
 .claude/
 docs/
+
+outputs/

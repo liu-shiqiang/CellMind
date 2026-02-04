@@ -7,6 +7,7 @@ import { X, User, Mail, Lock, AlertCircle } from 'lucide-react';
 import { useAuthStore, useSessionStore } from '@/stores';
 import { authService } from '@/services';
 import type { LoginRequest, RegisterRequest } from '@/types';
+import { PasswordResetDialog } from './PasswordResetDialog';
 
 interface LoginDialogProps {
   isOpen: boolean;
@@ -20,6 +21,7 @@ export const LoginDialog: React.FC<LoginDialogProps> = ({ isOpen, onClose }) => 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showSuccess, setShowSuccess] = useState(false);
+  const [showPasswordReset, setShowPasswordReset] = useState(false);
 
   // 登录表单
   const [loginData, setLoginData] = useState<LoginRequest>({
@@ -200,9 +202,18 @@ export const LoginDialog: React.FC<LoginDialogProps> = ({ isOpen, onClose }) => 
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                  密码
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-sm font-medium text-slate-700">
+                    密码
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowPasswordReset(true)}
+                    className="text-xs text-blue-600 hover:text-blue-700 transition-colors"
+                  >
+                    忘记密码？
+                  </button>
+                </div>
                 <div className="relative">
                   <Lock size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
@@ -346,6 +357,12 @@ export const LoginDialog: React.FC<LoginDialogProps> = ({ isOpen, onClose }) => 
           )}
         </div>
       </div>
+
+      {/* 密码重置对话框 */}
+      <PasswordResetDialog
+        isOpen={showPasswordReset}
+        onClose={() => setShowPasswordReset(false)}
+      />
     </div>
   );
 };

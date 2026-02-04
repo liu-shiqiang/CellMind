@@ -22,8 +22,16 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.scripts.interpretation_types import RagTopic, RagTopicContext
 
-from src.bio_pretrained_model.data_prep._scgpt_data_processor import ScGPTDataProcessor
-from src.bio_pretrained_model.scgpt._scgpt_model import ScGPTModelWrapper
+# scgpt 是可选依赖，仅用于 CellRag 类
+try:
+    from src.bio_pretrained_model.data_prep._scgpt_data_processor import ScGPTDataProcessor
+    from src.bio_pretrained_model.scgpt._scgpt_model import ScGPTModelWrapper
+    SCGPT_AVAILABLE = True
+except (ImportError, Exception) as e:
+    ScGPTDataProcessor = None
+    ScGPTModelWrapper = None
+    SCGPT_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"scGPT not available: {e}")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,10 +59,9 @@ class BioKnowledgeRag:
             # use provided path directly if it exists
             pass
         else:
-            # fall back to historical hard-coded path for backwards compatibility
-            self.embedding_model = (
-                "/home/share/huadjyin/home/liushiqiang/pretrained_model/all-MiniLM-L6-v2"
-            )
+            # 如果本地路径不存在，使用 HuggingFace Hub 模型名称
+            # 默认使用 sentence-transformers 的 all-MiniLM-L6-v2
+            self.embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
 
         device_override = os.environ.get("BIO_RAG_EMBEDDING_DEVICE")
         self.embeddings = self._load_embeddings(device_override)

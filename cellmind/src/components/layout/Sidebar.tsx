@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Brain, Plus, Sparkles, History, LayoutDashboard, Trash2, LogIn, User as UserIcon } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Brain, Plus, Sparkles, History, LayoutDashboard, Trash2, LogIn, User as UserIcon, Edit, Check, X } from 'lucide-react';
 import { useSessionStore, isLocalSession, useAuthStore } from '@/stores';
 import { useChatStore } from '@/stores';
 import { sessionService } from '@/services';
@@ -7,12 +7,17 @@ import { LoginDialog, UserMenu } from '@/components/auth';
 import type { Session } from '@/types';
 
 export const Sidebar: React.FC = () => {
-  const { sessions, currentSession, initSessions, setCurrentSession, removeSession, syncSessionsFromBackend } = useSessionStore();
+  const { sessions, currentSession, initSessions, setCurrentSession, removeSession, syncSessionsFromBackend, updateSession } = useSessionStore();
   const { clearMessages, loadSessionMessages, setCurrentSession: setChatSessionId, setUploadedFile, currentSessionId } = useChatStore();
   const { isAuthenticated } = useAuthStore();
   const [loadingSession, setLoadingSession] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [showLoginDialog, setShowLoginDialog] = useState(false);
+
+  // 会话编辑状态
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const editInputRef = useRef<HTMLInputElement>(null);
 
   // 初始化时从后端加载会话列表
   useEffect(() => {
@@ -27,6 +32,43 @@ export const Sidebar: React.FC = () => {
       window.removeEventListener('open-login-dialog', handleOpenLogin);
     };
   }, []);
+
+  // 自动聚焦编辑输入框
+  useEffect(() => {
+    if (editingSessionId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingSessionId]);
+
+  // 开始编辑会话标题
+  const handleStartEdit = (sessionId: string, currentTitle: string) => {
+    setEditingSessionId(sessionId);
+    setEditingTitle(currentTitle);
+  };
+
+  // 保存会话标题
+  const handleSaveEdit = async (sessionId: string) => {
+    if (!editingTitle.trim()) {
+      handleCancelEdit();
+      return;
+    }
+
+    try {
+      await sessionService.updateSession(sessionId, { title: editingTitle.trim() });
+      updateSession(sessionId, { title: editingTitle.trim() });
+      handleCancelEdit();
+    } catch (error) {
+      console.error('Failed to update session:', error);
+      alert('更新会话标题失败');
+    }
+  };
+
+  // 取消编辑
+  const handleCancelEdit = () => {
+    setEditingSessionId(null);
+    setEditingTitle('');
+  };
 
   // 初始化完成后同步当前会话与消息
   useEffect(() => {
@@ -181,49 +223,101 @@ export const Sidebar: React.FC = () => {
           <History size={12} /> 历史记录
         </h3>
         <div className="space-y-1">
-          {sessions.map((session) => (
-            <div
-              key={session.id}
-              className="relative group"
-            >
-              <button
-                onClick={() => handleLoadSession(session.id)}
-                disabled={loadingSession === session.id}
-                className={`w-full text-left px-3 py-3 rounded-xl transition-all ${
-                  currentSession?.id === session.id
-                    ? 'bg-white border border-slate-200 shadow-sm'
-                    : 'hover:bg-slate-100'
-                } ${loadingSession === session.id ? 'opacity-60' : ''}`}
+          {sessions.map((session) => {
+            const isEditing = editingSessionId === session.id;
+            const isActive = currentSession?.id === session.id;
+
+            return (
+              <div
+                key={session.id}
+                className={`relative group rounded-xl transition-all ${
+                  isActive ? 'bg-white border border-slate-200 shadow-sm' : 'hover:bg-slate-100'
+                }`}
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex-1 min-w-0">
-                    <span
-                      className={`text-sm font-semibold block truncate ${
-                        currentSession?.id === session.id ? 'text-blue-600' : 'text-slate-700'
+                {isEditing ? (
+                  <div className="px-3 py-2 flex items-center gap-2">
+                    <input
+                      ref={editInputRef}
+                      type="text"
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          handleSaveEdit(session.id);
+                        } else if (e.key === 'Escape') {
+                          handleCancelEdit();
+                        }
+                      }}
+                      className="flex-1 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1.5 text-sm font-medium text-slate-800 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                    />
+                    <button
+                      onClick={() => handleSaveEdit(session.id)}
+                      className="p-1.5 rounded-lg bg-green-50 text-green-600 hover:bg-green-100 transition-colors"
+                      title="保存"
+                    >
+                      <Check size={14} />
+                    </button>
+                    <button
+                      onClick={handleCancelEdit}
+                      className="p-1.5 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors"
+                      title="取消"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => handleLoadSession(session.id)}
+                      disabled={loadingSession === session.id}
+                      className={`w-full text-left px-3 py-3 ${
+                        loadingSession === session.id ? 'opacity-60' : ''
                       }`}
                     >
-                      {session.title}
-                    </span>
-                    <span className="text-[10px] text-slate-400">
-                      {session.message_count || 0} 条消息
-                    </span>
-                  </div>
-                  {loadingSession === session.id && (
-                    <span className="text-[10px] text-blue-500">加载中...</span>
-                  )}
-                </div>
-              </button>
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1 min-w-0">
+                          <span
+                            className={`text-sm font-semibold block truncate ${
+                              isActive ? 'text-blue-600' : 'text-slate-700'
+                            }`}
+                          >
+                            {session.title}
+                          </span>
+                          <span className="text-[10px] text-slate-400">
+                            {session.message_count || 0} 条消息
+                          </span>
+                        </div>
+                        {loadingSession === session.id && (
+                          <span className="text-[10px] text-blue-500">加载中...</span>
+                        )}
+                      </div>
+                    </button>
 
-              {/* 删除按钮 - 悬停时显示 */}
-              <button
-                onClick={(e) => handleDeleteSession(session.id, e)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-100 rounded-lg transition-all"
-                title="删除会话"
-              >
-                <Trash2 size={12} className="text-slate-400 hover:text-red-500" />
-              </button>
-            </div>
-          ))}
+                    {/* 编辑和删除按钮 - 悬停时显示 */}
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleStartEdit(session.id, session.title);
+                        }}
+                        className="p-1.5 hover:bg-slate-200 rounded-lg transition-all"
+                        title="编辑标题"
+                      >
+                        <Edit size={12} className="text-slate-400 hover:text-slate-600" />
+                      </button>
+                      <button
+                        onClick={(e) => handleDeleteSession(session.id, e)}
+                        className="p-1.5 hover:bg-red-100 rounded-lg transition-all"
+                        title="删除会话"
+                      >
+                        <Trash2 size={12} className="text-slate-400 hover:text-red-500" />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
 
           {sessions.length === 0 && (
             <div className="text-center py-8 text-slate-400 text-sm">

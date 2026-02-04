@@ -230,6 +230,11 @@ def create_initial_state(
         else {}
     )
 
+    # 如果有新的输入文件，重置project_state以避免基于旧状态跳过步骤
+    if input_files and len(input_files) > 0:
+        project_state = {}
+        memory_context.project_state = {}
+
     # 构建项目状态消息
     project_message = build_project_state_message(project_state)
     if project_message:
@@ -257,8 +262,8 @@ def create_initial_state(
         "project_state": project_state,
     }
 
-    # 恢复项目状态中的工作目录和输入文件
-    if project_state:
+    # 恢复项目状态中的工作目录和输入文件（仅当没有新输入文件时）
+    if project_state and not input_files:
         datasets = project_state.get("datasets", {})
         active_dataset = project_state.get("active_dataset") or project_state.get("last_dataset")
         if active_dataset and isinstance(datasets.get(active_dataset), dict):

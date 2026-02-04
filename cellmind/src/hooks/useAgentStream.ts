@@ -172,6 +172,35 @@ export function useAgentStream(options: AgentStreamOptions = {}): AgentStreamRet
 
       case 'tool_result':
         const resultTool = payload.tool || payload.tool_name;
+        const messageContent = payload.message?.content || payload.content;
+
+        // 解析工具结果，提取plot数据
+        if (messageContent && typeof messageContent === 'string') {
+          try {
+            const resultData = JSON.parse(messageContent);
+            // 检查各种可能的plot字段
+            const plotData = resultData.data?.plots || resultData.data?.plot ||
+                            resultData.data?.heatmap_plot || resultData.data?.annotated_umap_plot;
+            if (plotData) {
+              // 触发回调，传递完整的结果数据（包含plots）
+              onToolResult?.(resultTool || 'unknown', resultData);
+              return; // 已处理，不再调用默认回调
+            }
+          } catch (e) {
+            // JSON解析失败，使用原始逻辑
+          }
+        }
+
+        // 检查result中是否直接包含plots
+        if (payload.result && typeof payload.result === 'object') {
+          const plotData = payload.result.data?.plots || payload.result.data?.plot ||
+                          payload.result.data?.heatmap_plot || payload.result.data?.annotated_umap_plot;
+          if (plotData) {
+            onToolResult?.(resultTool || 'unknown', payload.result);
+            return;
+          }
+        }
+
         if (resultTool) {
           onToolResult?.(resultTool, payload.result);
         }

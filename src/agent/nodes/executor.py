@@ -30,7 +30,11 @@ FILE_PATH_TOOLS = {
     "pca_reduction",
     "cluster_and_umap",
     "find_marker_genes",
-    "annotate_cells",
+    "annotate_cells",  # 智能注释工具
+    "annotate_with_simple_markers",
+    "annotate_with_cima_markers",
+    "annotate_with_blood_markers",
+    "annotate_with_llm",  # LLM注释工具
     "differential_expression",
     "generate_analysis_report",
     "extract_embeddings_with_scgpt",
@@ -88,9 +92,19 @@ def _update_project_state_from_tool(
     else:
         input_file = None
 
+    # 辅助函数：从 payload 提取 result_path
+    # 修复：result_path 位于 payload["artifacts"]["result_path"]，而非 payload["result_path"]
+    def get_result_path(payload: dict | None) -> str | None:
+        if not payload:
+            return None
+        return payload.get("artifacts", {}).get("result_path")
+
     if payload and isinstance(payload, dict):
-        work_dir = payload.get("work_dir") or work_dir or payload.get("work_path") or payload.get("result_path")
+        work_dir = payload.get("work_dir") or work_dir or payload.get("work_path")
+        result_path = get_result_path(payload)
         dataset_hint = payload.get("dataset_id")
+    else:
+        result_path = None
 
     # 获取或创建数据集条目
     dataset_id = None
@@ -99,6 +113,18 @@ def _update_project_state_from_tool(
     if work_dir:
         from pathlib import Path
         dataset_id = Path(work_dir).name
+    elif result_path:
+        # 从结果路径中提取 run_id
+        from pathlib import Path
+        result_path_obj = Path(result_path)
+        # 查找 runs 目录下的 run_id
+        if "runs" in result_path_obj.parts:
+            runs_idx = result_path_obj.parts.index("runs")
+            if runs_idx + 1 < len(result_path_obj.parts):
+                dataset_id = result_path_obj.parts[runs_idx + 1]
+        if not dataset_id:
+            # 如果没有找到，使用现有 active_dataset
+            dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset")
     elif dataset_hint:
         dataset_id = dataset_hint
     else:
@@ -106,7 +132,7 @@ def _update_project_state_from_tool(
         if not dataset_id:
             dataset_id = state.get("run_id")
 
-    # 初始化数据集条目
+    # 初始化数据集条目 - 确保始终能找到或创建 dataset_id
     datasets: dict = project_state.setdefault("datasets", {})
     if not dataset_id:
         if work_dir:
@@ -115,67 +141,112 @@ def _update_project_state_from_tool(
         elif state.get("work_dir"):
             from pathlib import Path
             dataset_id = Path(state["work_dir"]).name
-        else:
-            dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset")
+        elif result_path:
+            # 从文件路径提取 run_id 作为 dataset_id
+            from pathlib import Path
+            result_path_obj = Path(result_path)
+            if "runs" in result_path_obj.parts:
+                runs_idx = result_path_obj.parts.index("runs")
+                if runs_idx + 1 < len(result_path_obj.parts):
+                    dataset_id = result_path_obj.parts[runs_idx + 1]
+        if not dataset_id:
+            dataset_id = project_state.get("active_dataset") or project_state.get("last_dataset") or "default"
 
+    # 确保 dataset_entry 被创建
     if dataset_id:
         dataset_entry = datasets.setdefault(dataset_id, {})
         dataset_entry.setdefault("completed_steps", [])
         dataset_entry.setdefault("input_files", [])
-        if input_file and input_file not in dataset_entry["input_files"]:
+        if input_file and input_file not in dataset_entry.get("input_files", []):
             dataset_entry["input_files"].append(input_file)
+    else:
+        # 极端情况：创建默认数据集条目
+        logger.warning(f"[{tool_name}] 无法确定 dataset_id，创建默认条目")
+        dataset_id = "default"
+        dataset_entry = datasets.setdefault(dataset_id, {})
+        dataset_entry.setdefault("completed_steps", [])
+        dataset_entry.setdefault("input_files", [])
 
     if dataset_entry is None:
         return
+
+    # 设置当前活动的数据集
+    if dataset_id:
+        project_state["active_dataset"] = dataset_id
+        project_state["last_dataset"] = dataset_id
 
     if work_dir:
         dataset_entry["work_dir"] = work_dir
         state["work_dir"] = work_dir
 
     # 更新具体工具的结果路径
+    # 修复：使用 get_result_path() 辅助函数从 payload["artifacts"]["result_path"] 提取路径
     if tool_name == "load_h5ad_data" and payload:
         loaded_path = (
-            payload.get("result_path")
-            or payload.get("file_path")
+            get_result_path(payload)
+            or payload.get("data", {}).get("file_path")
             or input_file
             or dataset_entry.get("loaded_path")
         )
         dataset_entry["loaded_path"] = loaded_path
-        if payload.get("work_dir"):
-            dataset_entry["work_dir"] = payload["work_dir"]
-            state["work_dir"] = payload["work_dir"]
+        if payload.get("data", {}).get("work_dir"):
+            dataset_entry["work_dir"] = payload["data"]["work_dir"]
+            state["work_dir"] = payload["data"]["work_dir"]
+
+        # 保存 n_cells 和 n_genes，用于后续报告生成
+        if payload.get("data", {}).get("n_cells"):
+            dataset_entry["n_cells"] = payload["data"]["n_cells"]
+        if payload.get("data", {}).get("n_genes"):
+            dataset_entry["n_genes"] = payload["data"]["n_genes"]
+        if payload.get("n_cells"):
+            dataset_entry["n_cells"] = payload["n_cells"]
+        if payload.get("n_genes"):
+            dataset_entry["n_genes"] = payload["n_genes"]
+
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "calculate_qc_metrics" and payload:
-        dataset_entry["qc_path"] = payload.get("result_path") or dataset_entry.get("qc_path")
+        dataset_entry["qc_path"] = get_result_path(payload) or dataset_entry.get("qc_path")
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "normalize_and_hvg" and payload:
-        dataset_entry["normalized_path"] = payload.get("result_path") or dataset_entry.get("normalized_path")
+        dataset_entry["normalized_path"] = get_result_path(payload) or dataset_entry.get("normalized_path")
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "pca_reduction" and payload:
-        dataset_entry["pca_path"] = payload.get("result_path") or dataset_entry.get("pca_path")
+        dataset_entry["pca_path"] = get_result_path(payload) or dataset_entry.get("pca_path")
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "cluster_and_umap" and payload:
-        dataset_entry["clustered_path"] = payload.get("result_path") or dataset_entry.get("clustered_path")
+        dataset_entry["clustered_path"] = get_result_path(payload) or dataset_entry.get("clustered_path")
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "find_marker_genes" and payload:
-        dataset_entry["markers_path"] = payload.get("result_path") or dataset_entry.get("markers_path")
+        dataset_entry["markers_path"] = get_result_path(payload) or dataset_entry.get("markers_path")
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "annotate_cells" and payload:
-        dataset_entry["annotated_path"] = payload.get("result_path") or dataset_entry.get("annotated_path")
+        dataset_entry["annotated_path"] = get_result_path(payload) or dataset_entry.get("annotated_path")
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name in ("annotate_with_simple_markers", "annotate_with_cima_markers", "annotate_with_blood_markers", "annotate_with_llm", "annotate_cells") and payload:
+        dataset_entry["annotated_path"] = get_result_path(payload) or dataset_entry.get("annotated_path")
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "differential_expression" and payload:
-        dataset_entry["de_path"] = payload.get("result_path") or dataset_entry.get("de_path")
+        dataset_entry["de_path"] = get_result_path(payload) or dataset_entry.get("de_path")
         _mark_completed(dataset_entry, tool_name)
 
     elif tool_name == "generate_analysis_report" and payload:
-        dataset_entry.setdefault("reports", {})["analysis_report"] = payload.get("result_path")
+        dataset_entry.setdefault("reports", {})["analysis_report"] = get_result_path(payload)
+        _mark_completed(dataset_entry, tool_name)
+
+    elif tool_name == "generate_comprehensive_report" and payload:
+        # 保存报告路径
+        if payload.get("status") == "success":
+            report_paths = payload.get("report_paths", [])
+            if report_paths:
+                dataset_entry.setdefault("reports", {})["comprehensive_report"] = report_paths
         _mark_completed(dataset_entry, tool_name)
 
     # 更新已完成的步骤记录
@@ -464,106 +535,299 @@ async def general_executor(state: AgentState) -> AgentState:
     处理流程:
     1. 检查是否有计划需要执行
     2. 检查步骤是否已完成（可跳过）
-    3. 使用LLM决定如何执行当前步骤
-    4. 处理工具调用
-    5. 更新状态和计划
+    3. 自动识别并执行当前步骤对应的工具
+    4. 更新状态和计划
+    5. 继续执行下一个步骤（循环）
     """
     plan = state.get("plan", [])
-    if not plan:
-        print("[General Executor] No remaining plan steps to execute.")
-        state["messages"].append(AIMessage(content="<observation>No remaining plan steps to execute.</observation>"))
-        state["next_step"] = "response"
-        return state
 
-    current_step = plan[0]
+    # 循环执行所有计划步骤，直到完成或出错
+    while plan:
+        current_step = plan[0]
 
-    # 检查步骤是否已完成
-    dataset_id, dataset_entry = _get_active_dataset_entry(state)
-    tool_name = identify_tool_from_step(str(current_step))
-    if tool_name and dataset_entry and is_tool_completed(dataset_entry, tool_name):
-        logger.info(
-            "[General Executor] Skipping completed step '%s' for dataset '%s'",
-            tool_name,
-            dataset_id
-        )
-        observation = (
-            f"<observation>检测到步骤 '{tool_name}' 已在当前数据集上完成，本轮将自动跳过。</observation>"
-        )
-        state["messages"].append(AIMessage(content=observation))
-        state["plan"] = plan[1:]
-        if state["plan"]:
-            state["next_step"] = "general_executor"
-        else:
-            state["execution_status"] = "completed"
-            state["next_step"] = "response"
-        return state
+        # 检查步骤是否已完成
+        dataset_id, dataset_entry = _get_active_dataset_entry(state)
+        tool_name = identify_tool_from_step(str(current_step))
 
-    # 格式化对话历史
-    messages = state.get("messages", [])
-    formatted_history = "\n"
-
-    if messages:
-        recent_messages = messages[-10:] if len(messages) > 10 else messages
-        for i, msg in enumerate(recent_messages):
-            content_preview = (msg.content[:500] + "...") if msg.content and len(msg.content) > 500 else (msg.content or "")
-            formatted_history += f" {i+1}. [{msg.type}]{content_preview}\n"
-    else:
-        formatted_history += " (No previous conversation history)\n"
-
-    # 构建执行提示
-    task_formatted = f"""
-You are a task execution agent responsible for completing a specific step in a larger plan.
-You can observe the contextual environment of this step, and you need to extract necessary parameters from the previous conversation history to complete the current task.
-You cannot fabricate parameters for tool calls. Parameters must be included in the conversation history, otherwise you will be punished.
-If there are no tools in the conversation history to call the required parameters, make a request to the user.
-
-You need to complete this task in the current step: {current_step}
-
-Here is the recent conversation history: This provides a complete background of the interactions to date. Read carefully to understand:
-*What has already been done.
-*What data or variables may already exist in the execution environment (from the previous'<execute>'block).
-*Any specific instructions or feedback given by the user or observed from previous executions.
-
-{formatted_history}
-"""
-
-    try:
-        llm_with_tools = get_llm_with_tools(TOOLS)
-        decision_message = llm_with_tools.invoke(task_formatted)
-        print(f"LLM Decision Message: {decision_message}")
-
-        if decision_message.tool_calls:
-            # 添加工具调用消息
-            concise_tool_call_message = AIMessage(
-                content=json.dumps(decision_message.tool_calls, indent=2),
-                tool_calls=decision_message.tool_calls
+        # 如果步骤已完成，跳过
+        if tool_name and dataset_entry and is_tool_completed(dataset_entry, tool_name):
+            logger.info(
+                "[General Executor] Skipping completed step '%s' for dataset '%s'",
+                tool_name,
+                dataset_id
             )
-            state["messages"].append(concise_tool_call_message)
+            observation = (
+                f"<observation>检测到步骤 '{tool_name}' 已在当前数据集上完成，本轮将自动跳过。</observation>"
+            )
+            state["messages"].append(AIMessage(content=observation))
+            state["plan"] = plan[1:]
+            plan = state["plan"]
+            continue
 
-            # 处理工具调用
-            state = await _handle_tool_calls(state, decision_message, current_step)
-        else:
-            # LLM没有调用工具
-            response_content = decision_message.content.strip()
+        # 如果无法识别工具，跳过此步骤
+        if not tool_name:
+            logger.warning("[General Executor] Could not identify tool for step: %s", current_step)
+            observation = f"<observation>无法识别步骤对应的工具: {current_step}，跳过此步骤。</observation>"
+            state["messages"].append(AIMessage(content=observation))
+            state["plan"] = plan[1:]
+            plan = state["plan"]
+            continue
 
-            if not response_content:
-                error_msg = "LLM did not call any tool and provided no response content. You need to reanalyze the conversation history to complete the task"
-                print(error_msg)
-                state["messages"].append(AIMessage(content=f"<EXECUTION_ERROR>{error_msg}</EXECUTION_ERROR>"))
-                state["next_step"] = "intelligent_replanner"
+        # 检查工具是否可用
+        if tool_name not in tools_by_name:
+            error_msg = f"Tool '{tool_name}' not found in available tools."
+            print(error_msg)
+            state["messages"].append(AIMessage(content=f"<EXECUTION_ERROR>{error_msg}</EXECUTION_ERROR>"))
+            state["execution_status"] = "failed"
+            state["error_info"] = {"detail": error_msg, "tool": tool_name, "step": str(current_step)}
+            state["next_step"] = "response"
+            return state
 
-            print(f"LLM provided a direct response or request for input: {response_content}")
+        # 构建工具调用参数
+        tool_args = _build_tool_args(state, tool_name)
 
-            observation_content = f"<observation>LLM response to task '{current_step}':{response_content}</observation>"
-            state["messages"].append(AIMessage(content=observation_content))
-            state["next_step"] = "intelligent_replanner"
+        # 创建模拟的 AIMessage 包含工具调用
+        from uuid import uuid4
+        tool_call_id = str(uuid4())
+        mock_ai_message = AIMessage(
+            content=f"Executing tool: {tool_name}",
+            tool_calls=[{
+                "name": tool_name,
+                "args": tool_args,
+                "id": tool_call_id
+            }]
+        )
 
-    except Exception as e:
-        error_msg = f"An unexpected error occurred in execute_step: {e}"
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        state["messages"].append(AIMessage(content=f"<EXECUTION_ERROR>{error_msg}</EXECUTION_ERROR>"))
-        state["next_step"] = "intelligent_replanner"
+        # 添加工具调用消息到历史
+        state["messages"].append(mock_ai_message)
 
+        # 处理工具调用
+        state = await _handle_tool_calls(state, mock_ai_message, str(current_step))
+
+        # 检查执行是否失败
+        if state.get("execution_status") == "failed":
+            return state
+
+        # 更新 plan 引用
+        plan = state.get("plan", [])
+
+    # 所有步骤已完成
+    print("[General Executor] All plan steps completed.")
+    state["execution_status"] = "completed"
+    state["next_step"] = "response"
     return state
+
+
+def _build_tool_args(state: AgentState, tool_name: str) -> Dict[str, Any]:
+    """根据工具名称构建工具调用参数
+
+    按优先级获取文件路径：
+    1. 使用上一步骤保存的最新结果路径
+    2. 使用原始上传的文件路径
+    3. 从 work_dir/artifacts/data 中查找最新的 h5ad 文件
+    4. 从 work_dir 中查找最新的 h5ad 文件
+    """
+    tool_args = {}
+
+    # 获取最新的文件路径（从project_state中获取上一步的结果）
+    latest_file_path = _get_latest_result_path(state, tool_name)
+
+    # 从 state 获取文件路径
+    if tool_name in FILE_PATH_TOOLS:
+        if latest_file_path:
+            tool_args["file_path"] = latest_file_path
+        else:
+            # 回退策略1: 从 work_dir 的 artifacts/data 查找最新 h5ad
+            if state.get("work_dir"):
+                from pathlib import Path
+                work_dir = Path(state["work_dir"])
+                artifacts_dir = work_dir / "artifacts" / "data"
+                if artifacts_dir.exists():
+                    h5ad_files = sorted(
+                        artifacts_dir.glob("*.h5ad"),
+                        key=lambda x: x.stat().st_mtime,
+                        reverse=True
+                    )
+                    if h5ad_files:
+                        tool_args["file_path"] = str(h5ad_files[0])
+                        logger.info(f"[{tool_name}] 使用 artifacts 中最新文件: {h5ad_files[0]}")
+
+            # 回退策略2: 使用 input_files
+            if "file_path" not in tool_args:
+                input_files = state.get("input_files", [])
+                if input_files:
+                    tool_args["file_path"] = input_files[0]
+
+            # 回退策略3: 从 work_dir 根目录查找最新的 h5ad 文件
+            if "file_path" not in tool_args and state.get("work_dir"):
+                from pathlib import Path
+                work_dir = Path(state["work_dir"])
+                h5ad_files = sorted(work_dir.glob("*.h5ad"), key=lambda x: x.stat().st_mtime, reverse=True)
+                if h5ad_files:
+                    tool_args["file_path"] = str(h5ad_files[0])
+                    logger.info(f"[{tool_name}] 使用 work_dir 中最新文件: {h5ad_files[0]}")
+
+    # 从 state 获取 work_dir
+    if tool_name in WORK_DIR_TOOLS or tool_name in {
+        "calculate_qc_metrics", "normalize_and_hvg", "pca_reduction",
+        "cluster_and_umap", "find_marker_genes", "annotate_cells",
+        "differential_expression", "generate_analysis_report",
+        "generate_comprehensive_report"
+    }:
+        work_dir = state.get("work_dir")
+        if work_dir:
+            tool_args["work_dir"] = work_dir
+
+    # 特殊工具的额外参数
+    if tool_name == "annotate_cells":
+        # 检查是否有组织类型信息
+        messages = state.get("messages", [])
+        for msg in reversed(messages[-20:]):
+            if msg.content and "tissue" in msg.content.lower():
+                # 简单提取组织类型（可根据需要增强）
+                tool_args["tissue_type"] = "human"  # 默认值
+
+    elif tool_name == "generate_comprehensive_report":
+        # 获取 run_id
+        run_id = state.get("run_id", "")
+
+        # 获取输入文件
+        input_files = state.get("input_files", [])
+        data_file = input_files[0] if input_files else ""
+
+        # 从 dataset_entry 获取 n_cells 和 n_genes
+        _, dataset_entry = _get_active_dataset_entry(state)
+        n_cells = dataset_entry.get("n_cells", 0) if dataset_entry else 0
+        n_genes = dataset_entry.get("n_genes", 0) if dataset_entry else 0
+
+        # 如果 dataset_entry 中没有 n_cells/n_genes，尝试从原始加载信息中获取
+        if n_cells == 0 or n_genes == 0:
+            analysis_notes = state.get("analysis_notes", {})
+            tool_runs = analysis_notes.get("tool_runs", [])
+            for run in tool_runs:
+                if run.get("tool") == "load_h5ad_data":
+                    # 尝试从工具运行结果中获取
+                    if "n_cells" in run:
+                        n_cells = run["n_cells"]
+                    if "n_genes" in run:
+                        n_genes = run["n_genes"]
+                    break
+
+        # 收集所有工具执行结果作为 analysis_results
+        # build_report_from_results 期望的格式: results["tools"] 是一个 dict
+        # 其中 key 是 tool_name, value 是单个 tool_result dict (不是 list)
+        tool_runs = state.get("analysis_notes", {}).get("tool_runs", [])
+
+        # 构建 tools 字典 - 每个工具只保留最后一次执行结果
+        tools_dict = {}
+        for run in tool_runs:
+            tool_n = run.get("tool")
+            if tool_n:
+                # 保留最后一次的结果
+                tools_dict[tool_n] = run
+
+        # 构建完整的 results 字典
+        results_dict = {
+            "tools": tools_dict,
+            "tool_runs": tool_runs,
+        }
+
+        tool_args = {
+            "run_id": run_id or "",
+            "data_file": data_file,
+            "n_cells": n_cells if n_cells else 0,
+            "n_genes": n_genes if n_genes else 0,
+            "analysis_results": json.dumps(results_dict, ensure_ascii=False),
+            "output_format": "both",
+        }
+
+    return tool_args
+
+
+def _get_latest_result_path(state: AgentState, tool_name: str) -> str | None:
+    """获取工具应该使用的最新结果路径
+
+    每个工具应该使用上一步骤保存的结果文件，这样可以确保：
+    1. 依次传递处理后的数据
+    2. 每个步骤都基于最新的结果继续处理
+    """
+    # 工具到其依赖的前置工具的映射
+    tool_dependency_map = {
+        "calculate_qc_metrics": ["load_h5ad_data"],
+        "normalize_and_hvg": ["calculate_qc_metrics"],
+        "pca_reduction": ["normalize_and_hvg"],
+        "cluster_and_umap": ["pca_reduction"],
+        "find_marker_genes": ["cluster_and_umap"],
+        "annotate_cells": ["find_marker_genes"],  # 智能注释工具
+        "annotate_with_simple_markers": ["find_marker_genes"],
+        "annotate_with_cima_markers": ["find_marker_genes"],
+        "annotate_with_blood_markers": ["find_marker_genes"],
+        "annotate_with_llm": ["find_marker_genes"],  # LLM注释工具
+        "differential_expression": ["cluster_and_umap"],
+        "generate_analysis_report": ["annotate_cells", "annotate_with_simple_markers", "annotate_with_cima_markers", "annotate_with_blood_markers", "annotate_with_llm"],
+    }
+
+    # 工具结果路径在 dataset_entry 中的字段名
+    path_field_map = {
+        "load_h5ad_data": "loaded_path",
+        "calculate_qc_metrics": "qc_path",
+        "normalize_and_hvg": "normalized_path",
+        "pca_reduction": "pca_path",
+        "cluster_and_umap": "clustered_path",
+        "find_marker_genes": "markers_path",
+        "annotate_cells": "annotated_path",
+        "annotate_with_simple_markers": "annotated_path",
+        "annotate_with_cima_markers": "annotated_path",
+        "annotate_with_blood_markers": "annotated_path",
+        "annotate_with_llm": "annotated_path",
+        "differential_expression": "de_path",
+    }
+
+    # 获取当前数据集条目
+    _, dataset_entry = _get_active_dataset_entry(state)
+
+    # 查找依赖工具的结果路径
+    if dataset_entry:
+        dependency_tools = tool_dependency_map.get(tool_name, [])
+        for dep_tool in reversed(dependency_tools):  # 反向查找，取最接近的
+            field_name = path_field_map.get(dep_tool)
+            if field_name and field_name in dataset_entry:
+                result_path = dataset_entry[field_name]
+                if result_path:
+                    logger.info(f"[{tool_name}] Using result from {dep_tool}: {result_path}")
+                    return result_path
+
+    # 回退策略: 基于文件名模式查找
+    if state.get("work_dir"):
+        from pathlib import Path
+        work_dir = Path(state["work_dir"])
+        artifacts_dir = work_dir / "artifacts" / "data"
+
+        # 根据工具依赖关系查找对应的文件模式
+        file_patterns = {
+            "find_marker_genes": "*cluster*",
+            "annotate_cells": "*marker*",
+            "annotate_with_simple_markers": "*marker*",
+            "annotate_with_cima_markers": "*marker*",
+            "annotate_with_blood_markers": "*marker*",
+            "annotate_with_llm": "*marker*",
+            "differential_expression": "*cluster*",
+            "generate_analysis_report": "*annotate*",
+        }
+
+        pattern = file_patterns.get(tool_name)
+        if pattern and artifacts_dir.exists():
+            matching_files = list(artifacts_dir.glob(f"{pattern}.h5ad"))
+            if matching_files:
+                latest = max(matching_files, key=lambda f: f.stat().st_mtime)
+                logger.info(f"[{tool_name}] 通过模式匹配找到文件: {latest}")
+                return str(latest)
+
+        # 如果没有找到特定模式的文件，使用最新的任意 h5ad 文件
+        if artifacts_dir.exists():
+            h5ad_files = sorted(artifacts_dir.glob("*.h5ad"), key=lambda x: x.stat().st_mtime, reverse=True)
+            if h5ad_files:
+                logger.info(f"[{tool_name}] 使用 artifacts 中最新文件: {h5ad_files[0]}")
+                return str(h5ad_files[0])
+
+    return None

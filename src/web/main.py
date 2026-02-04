@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.web.config import settings
-from src.web.routes import chat, agent, upload, session, visualization, auth
+from src.web.routes import chat, agent, upload, session, visualization, auth, password_reset, artifacts
 from src.web import routes_jobs
 from src.db.session import init_db, close_db
 
@@ -50,11 +50,13 @@ def create_app() -> FastAPI:
 
     # 注册路由
     app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+    app.include_router(password_reset.router, prefix="/api/auth", tags=["Password Reset"])
     app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
     app.include_router(agent.router, prefix="/api/agent", tags=["Agent"])
     app.include_router(upload.router, prefix="/api/upload", tags=["Upload"])
     app.include_router(session.router, prefix="/api/sessions", tags=["Session"])
     app.include_router(visualization.router, prefix="/api/visualization", tags=["Visualization"])
+    app.include_router(artifacts.router, tags=["Artifacts"])
     app.include_router(routes_jobs.router, prefix="/api", tags=["Jobs"])
 
     return app
