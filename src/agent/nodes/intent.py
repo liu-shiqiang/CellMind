@@ -332,12 +332,44 @@ Guidelines:
 """
 
     try:
-        # 使用结构化输出
-        intent_llm = llm.with_structured_output(IntentResponse)
-        messages = [SystemMessage(content=intent_prompt)] + state["messages"]
-        raw_result = intent_llm.invoke(messages)
+        # 使用 JSON 响应格式（兼容智谱 API）
+        json_prompt = intent_prompt + """
 
-        logger.info("[Intent Recognition] Raw classifier output: %s", raw_result)
+IMPORTANT: You must respond ONLY with a valid JSON object. Do not include any explanatory text before or after the JSON.
+Example format:
+{
+  "intents": [{"intent": "clustering_analysis", "description": "...", "confidence": 0.9, "dependencies": [], "justification": "..."}],
+  "is_task": true
+}
+"""
+        # GLM API 对 SystemMessage 支持不完善，使用 HumanMessage 代替
+        messages = [HumanMessage(content=json_prompt)] + state["messages"]
+
+        # 直接调用 LLM 获取 JSON 响应
+        response = llm.invoke(messages)
+        response_text = getattr(response, "content", str(response)).strip()
+
+        # 尝试提取 JSON（处理可能的 markdown 代码块）
+        import re
+        json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+        if json_match:
+            response_text = json_match.group(1).strip()
+        elif response_text.startswith("```"):
+            response_text = response_text.strip("`").replace("json", "").strip()
+
+        logger.info("[Intent Recognition] Raw LLM response: %s", response_text[:500])
+
+        # 解析 JSON
+        parsed = json.loads(response_text)
+
+        # 构建 IntentResponse 对象
+        intents_data = parsed.get("intents", [])
+        intents = []
+        for intent_data in intents_data:
+            intents.append(Intent(**intent_data))
+
+        raw_result = IntentResponse(intents=intents, is_task=parsed.get("is_task", False))
+        logger.info("[Intent Recognition] Parsed result: %s", raw_result)
 
         # 后处理结果
         processed_result = _postprocess_intent_response(raw_result)
@@ -345,7 +377,7 @@ Guidelines:
             state,
             processed_result,
             source="llm",
-            rationale="Structured intent classification",
+            rationale="JSON intent classification",
             raw_response=raw_result,
         )
 

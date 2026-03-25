@@ -359,7 +359,9 @@ class ORAFactory(EnrichmentFactory):
 
 
 class ORAEnrichmentArgs(BaseModel):
-    input_file: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
+    file_path: str = Field(..., description="Path to the annotated AnnData (.h5ad) file.")
+    # 兼容别名
+    input_file: Optional[str] = Field(default=None, description="Deprecated: use file_path instead.")
     work_dir: Optional[str] = Field(
         default=None,
         description="Work directory where enrichment outputs will be stored.",
@@ -380,7 +382,7 @@ class ORAEnrichmentArgs(BaseModel):
 
 @tool("run_ora_enrichment", args_schema=ORAEnrichmentArgs)
 def run_ora_enrichment(
-    input_file: str,
+    file_path: str,
     work_dir: Optional[str] = None,
     celltype_col: str = "pred_celltype",
     target_celltype: Optional[str] = None,
@@ -389,12 +391,16 @@ def run_ora_enrichment(
     enrichr_lib_path: Optional[str] = None,
     gene_list: Optional[List[str]] = None,
     gene_list_file: Optional[str] = None,
-    list_label: Optional[str] = None, 
+    list_label: Optional[str] = None,
     cluster_id: Optional[str] = None,
+    # 兼容旧参数名
+    input_file: Optional[str] = None,
 ) -> str:
     """Run ORA enrichment using marker genes derived from a cluster or a custom gene list."""
 
-    input_path = Path(input_file).expanduser().resolve()
+    # 支持file_path和input_file两种参数名
+    actual_file_path = input_file or file_path
+    input_path = Path(actual_file_path).expanduser().resolve()
     if not input_path.exists() and not (gene_list or gene_list_file):
         raise FileNotFoundError(f"Input file not found: {input_path}")
 

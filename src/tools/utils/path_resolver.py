@@ -234,25 +234,55 @@ class PathResolver:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
 
-    def resolve_all_output_dirs(self, input_path: Path) -> Tuple[Path, Path, Path]:
+    def resolve_all_output_dirs(self, input_path: Path, run_id: Optional[str] = None) -> Tuple[Path, Path, Path]:
         """根据输入路径解析所有产物目录（Job模式优先）
 
         Args:
             input_path: 输入文件路径
+            run_id: 可选的运行ID（优先使用此值）
 
         Returns:
             (data_dir, tables_dir, plots_dir) 元组
         """
         runs_root = self.runs_dir.resolve()
+
+        # 如果直接提供了 run_id，使用它
+        if run_id:
+            artifacts_dir = runs_root / run_id / "artifacts"
+            data_dir = artifacts_dir / "data"
+            tables_dir = artifacts_dir / "tables"
+            plots_dir = artifacts_dir / "plots"
+            for dir_path in (data_dir, tables_dir, plots_dir):
+                dir_path.mkdir(parents=True, exist_ok=True)
+            return data_dir, tables_dir, plots_dir
+
+        # 尝试从输入路径推断 run_id
         try:
             if input_path.is_relative_to(runs_root):
-                run_id = input_path.relative_to(runs_root).parts[0]
-                artifacts_dir = runs_root / run_id / "artifacts"
+                rel_path = input_path.relative_to(runs_root)
+                # 检查是否在某个 run_id 目录下 (runs/{run_id}/...)
+                if len(rel_path.parts) > 1 and rel_path.parts[0] not in ['artifacts', 'uploads']:
+                    # 看起来像是一个有效的 run_id
+                    potential_run_id = rel_path.parts[0]
+                    artifacts_dir = runs_root / potential_run_id / "artifacts"
+                    data_dir = artifacts_dir / "data"
+                    tables_dir = artifacts_dir / "tables"
+                    plots_dir = artifacts_dir / "plots"
+                    for dir_path in (data_dir, tables_dir, plots_dir):
+                        dir_path.mkdir(parents=True, exist_ok=True)
+                    return data_dir, tables_dir, plots_dir
+
+                # 文件直接在 runs 目录下，不是在 run_id 子目录中
+                # 创建新的 run_id (使用当前时间戳)
+                from datetime import datetime
+                new_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                artifacts_dir = runs_root / new_run_id / "artifacts"
                 data_dir = artifacts_dir / "data"
                 tables_dir = artifacts_dir / "tables"
                 plots_dir = artifacts_dir / "plots"
                 for dir_path in (data_dir, tables_dir, plots_dir):
                     dir_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"输入文件直接在 runs 目录下，创建新的运行目录: {new_run_id}")
                 return data_dir, tables_dir, plots_dir
         except ValueError:
             pass

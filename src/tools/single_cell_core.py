@@ -1158,7 +1158,7 @@ def annotate_cells(
 @tool("differential_expression", return_direct=False)
 def differential_expression(
     file_path: str,
-    group1: str,
+    group1: Optional[str] = None,
     group2: Optional[str] = None,
     groupby: str = "cell_type",
     method: str = "wilcoxon",
@@ -1171,7 +1171,7 @@ def differential_expression(
 
     Args:
         file_path: .h5ad 文件路径
-        group1: 第一组名称（如 'T cells'）
+        group1: 第一组名称（如 'T cells'，可选，默认使用最大的细胞群）
         group2: 第二组名称（可选，默认是其余所有细胞）
         groupby: 分组依据的obs列名
         method: 差异分析方法
@@ -1186,7 +1186,42 @@ def differential_expression(
         '{"up_genes": {"CD3D": {...}}, "down_genes": {"CD79A": {...}}}'
     """
     try:
-        logger.info(f"开始差异表达分析: {file_path}, {group1} vs {group2}")
+        logger.info(f"开始差异表达分析: {file_path}")
+
+        # 验证参数
+        method = validator.validate_choices(method, ['wilcoxon', 't-test', 'rank'], 'method')
+        n_genes = int(validator.validate_positive_number(n_genes, 'n_genes', 1, 1000))
+
+        # 解析路径并加载数据
+        path = _resolve_input_path(file_path)
+        adata = sc.read_h5ad(path)
+        data_dir, tables_dir, _ = _resolve_artifact_dirs(path)
+
+        # 验证分组列
+        groupby = validator.validate_groupby(adata, groupby)
+
+        # 自动选择 group1（如果未提供）
+        if group1 is None:
+            # 获取可用的组
+            if groupby in adata.obs.columns:
+                groups = adata.obs[groupby].cat.categories if hasattr(adata.obs[groupby], 'cat') else adata.obs[groupby].unique()
+                # 选择细胞数量最多的组
+                group_counts = adata.obs[groupby].value_counts()
+                if len(group_counts) > 0:
+                    group1 = group_counts.index[0]
+                    logger.info(f"自动选择 group1: {group1} (细胞数: {group_counts.iloc[0]})")
+                else:
+                    return create_tool_result(
+                        status="error",
+                        message=f"未找到可用的细胞类型，无法进行差异分析"
+                    ).to_json()
+            else:
+                return create_tool_result(
+                    status="error",
+                    message=f"数据中没有 {groupby} 列"
+                ).to_json()
+
+        logger.info(f"差异表达分析: {file_path}, {group1} vs {group2 or '其余细胞'}")
 
         # 验证参数
         method = validator.validate_choices(method, ['wilcoxon', 't-test', 'rank'], 'method')

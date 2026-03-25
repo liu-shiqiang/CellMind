@@ -1,6 +1,17 @@
 """
 CellMind FastAPI 应用入口
 """
+import os
+
+# 修复 OMP threading 冲突问题
+# 设置这些环境变量以避免多个库（numpy, scipy, sklearn）之间的 OpenMP 冲突
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+os.environ.setdefault('OMP_MAX_ACTIVE_LEVELS', '0')  # 禁用嵌套并行
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

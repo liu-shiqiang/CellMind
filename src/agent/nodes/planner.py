@@ -341,7 +341,6 @@ IMPORTANT:
     for attempt in range(max_attempts):
         try:
             llm = get_llm()
-            plan_llm = llm.with_structured_output(Plan)
 
             plan_prompt = plan_prompt_template.format(tools_info=tools_info)
 
@@ -357,10 +356,56 @@ Please carefully review the feedback above and regenerate the plan, ensuring it 
 """
                 plan_prompt = plan_prompt + "\n\n" + feedback_prompt
 
+            # 添加 JSON 格式要求（兼容智谱 API）
+            plan_prompt += """
+
+IMPORTANT: You must respond ONLY with a valid JSON object. Do not include any explanatory text before or after the JSON.
+Example format:
+{
+  "steps": ["步骤1", "步骤2", "步骤3"]
+}
+"""
+
             state["messages"].append(HumanMessage(content=plan_prompt))
 
             plan_messages = state["messages"]
-            plan = plan_llm.invoke(plan_messages)
+
+            # 使用 JSON 响应格式
+            response = llm.invoke(plan_messages)
+            response_text = getattr(response, "content", str(response)).strip()
+
+            # 尝试提取 JSON（处理可能的 markdown 代码块）
+            import re
+            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                response_text = json_match.group(1).strip()
+            elif response_text.startswith("```"):
+                response_text = response_text.strip("`").replace("json", "").strip()
+
+            logger.info(f"[General Planner] Raw LLM response: {response_text[:500]}")
+
+            # 解析 JSON
+            parsed = json.loads(response_text)
+            raw_steps = parsed.get("steps", [])
+
+            # 处理步骤格式：兼容字符串和字典两种格式
+            processed_steps = []
+            for step in raw_steps:
+                if isinstance(step, dict):
+                    # 字典格式：转换为字符串描述
+                    tool_name = step.get("tool", "")
+                    params = step.get("params", {})
+                    # 移除 None 值
+                    params = {k: v for k, v in params.items() if v is not None}
+                    if params:
+                        param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+                        processed_steps.append(f"{tool_name}({param_str})")
+                    else:
+                        processed_steps.append(tool_name)
+                elif isinstance(step, str):
+                    processed_steps.append(step)
+
+            plan = Plan(steps=processed_steps)
             logger.info(f"[General Planner] Plan generation result: {plan}")
 
             if plan and isinstance(plan.steps, list) and len(plan.steps) > 0:

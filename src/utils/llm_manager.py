@@ -5,6 +5,7 @@
 """
 
 import logging
+import os
 from typing import Optional, Dict, Any
 from functools import lru_cache
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class LLMManager:
     """统一LLM管理器"""
-    
+
     def __init__(self):
         self._llm_instances: Dict[str, BaseLanguageModel] = {}
         self._default_model = settings.LLM_MODEL
@@ -26,6 +27,11 @@ class LLMManager:
         self._base_url = settings.LLM_BASE_URL
         self._temperature = settings.LLM_TEMPERATURE
         self._api_key = settings.LLM_API_KEY
+
+        # 设置智谱 API Key 到环境变量（ChatOpenAI 从 OPENAI_API_KEY 读取）
+        if self._api_key and (self._base_url and "bigmodel" in self._base_url):
+            os.environ["OPENAI_API_KEY"] = self._api_key
+            logger.info("已设置智谱 API Key 到环境变量")
         
     def get_llm(self, model_name: Optional[str] = None) -> BaseLanguageModel:
         """
@@ -57,10 +63,10 @@ class LLMManager:
     def _create_llm(self, model_name: str) -> BaseLanguageModel:
         """
         创建LLM实例
-        
+
         Args:
             model_name: 模型名称
-            
+
         Returns:
             LLM实例
         """
@@ -68,11 +74,12 @@ class LLMManager:
             # 根据模型名称判断类型
             if model_name.startswith(("gpt-", "claude-", "gemini-", "glm-")):
                 # OpenAI/Anthropic/Google/智谱模型
+                # 智谱 API 需要 api_key，如果没有提供则从环境变量获取
                 llm = ChatOpenAI(
                     model=model_name,
                     temperature=self._temperature,
                     base_url=self._base_url if self._base_url != "http://localhost:11434" else None,
-                    api_key=self._api_key if self._api_key else None
+                    api_key=self._api_key if self._api_key else "dummy"  # 必须提供值，让ChatOpenAI从环境变量读取
                 )
             else:
                 # Ollama模型
@@ -81,10 +88,10 @@ class LLMManager:
                     temperature=self._temperature,
                     base_url=self._base_url
                 )
-            
+
             logger.info(f"创建LLM实例: {model_name}")
             return llm
-            
+
         except Exception as e:
             logger.error(f"创建LLM实例失败: {model_name}, 错误: {e}")
             # 降级到默认Ollama模型
