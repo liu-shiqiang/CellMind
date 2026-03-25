@@ -34,10 +34,10 @@ class Settings(BaseSettings):
     LOGIN_LOCKOUT_MINUTES: int = 15
 
     # LLM配置
-    LLM_PROVIDER: str = "ollama"  # openai, anthropic, ollama
-    LLM_API_KEY: str = ""
-    LLM_BASE_URL: str = "http://localhost:11434"
-    LLM_MODEL: str = "qwen3:8b"
+    LLM_PROVIDER: str = "openai"  # openai, anthropic, ollama
+    LLM_API_KEY: str = ""  # 从环境变量读取
+    LLM_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4"
+    LLM_MODEL: str = "glm-4"
     LLM_TEMPERATURE: float = 0.7
 
     # RAG配置

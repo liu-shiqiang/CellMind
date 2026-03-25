@@ -25,6 +25,7 @@ class LLMManager:
         self._tool_model = getattr(settings, "LLM_TOOL_MODEL", None)
         self._base_url = settings.LLM_BASE_URL
         self._temperature = settings.LLM_TEMPERATURE
+        self._api_key = settings.LLM_API_KEY
         
     def get_llm(self, model_name: Optional[str] = None) -> BaseLanguageModel:
         """
@@ -65,12 +66,13 @@ class LLMManager:
         """
         try:
             # 根据模型名称判断类型
-            if model_name.startswith(("gpt-", "claude-", "gemini-")):
-                # OpenAI/Anthropic/Google模型
+            if model_name.startswith(("gpt-", "claude-", "gemini-", "glm-")):
+                # OpenAI/Anthropic/Google/智谱模型
                 llm = ChatOpenAI(
                     model=model_name,
                     temperature=self._temperature,
-                    base_url=self._base_url if self._base_url != "http://localhost:11434" else None
+                    base_url=self._base_url if self._base_url != "http://localhost:11434" else None,
+                    api_key=self._api_key if self._api_key else None
                 )
             else:
                 # Ollama模型

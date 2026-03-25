@@ -99,3 +99,9 @@ cellmind/dist/
 docs/
 
 outputs/
+
+# ====================
+# Environment Variables
+# ====================
+.env
+.env.local
