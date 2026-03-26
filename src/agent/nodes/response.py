@@ -250,6 +250,95 @@ def _generate_bio_rag_answer(question: str, state: AgentState) -> tuple[str, Dic
         return error_msg, {"error": str(exc)}
 
 
+def _collect_plot_files(state: AgentState) -> list[dict]:
+    """收集所有生成的图表文件"""
+    from pathlib import Path
+
+    plots = []
+    work_dir = state.get("work_dir")
+    run_id = state.get("run_id")
+
+    # 尝试从不同位置获取图表
+    possible_dirs = []
+    if work_dir:
+        possible_dirs.append(Path(work_dir) / "artifacts" / "plots")
+    if run_id:
+        from src.web.config import settings
+        runs_dir = Path(settings.RUNS_DIR)
+        possible_dirs.append(runs_dir / run_id / "artifacts" / "plots")
+
+    for plots_dir in possible_dirs:
+        if plots_dir.exists():
+            for plot_file in plots_dir.glob("*.png"):
+                plots.append({
+                    "name": plot_file.stem,
+                    "path": str(plot_file),
+                    "url_path": f"/api/artifacts/{run_id}/plots/{plot_file.name}" if run_id else None
+                })
+
+    return plots
+
+
+def _generate_analysis_interpretation(state: AgentState, tool_results: list) -> str:
+    """生成分析结果解读"""
+    analysis_summary = []
+
+    # 提取关键指标
+    for result in tool_results:
+        tool_name = result.get("tool", "")
+        result_data = result.get("result", "")
+
+        try:
+            import json
+            if isinstance(result_data, str):
+                result_data = json.loads(result_data)
+
+            if not isinstance(result_data, dict):
+                continue
+
+            data = result_data.get("data", {})
+
+            if tool_name == "calculate_qc_metrics":
+                n_cells_before = data.get("n_cells_before", 0)
+                n_cells_after = data.get("n_cells_after", 0)
+                filter_rate = data.get("filter_rate", "")
+                analysis_summary.append(f"**质控分析**: 从 {n_cells_before} 个细胞过滤到 {n_cells_after} 个细胞 (过滤率 {filter_rate})")
+
+            elif tool_name == "normalize_and_hvg":
+                n_hvg = data.get("n_hvg", 0)
+                analysis_summary.append(f"**标准化**: 识别了 {n_hvg} 个高变基因")
+
+            elif tool_name == "pca_reduction":
+                variance_30 = data.get("cumulative_variance_30pc", 0)
+                analysis_summary.append(f"**降维分析**: 前30个主成分解释了 {variance_30:.1%} 的方差")
+
+            elif tool_name == "cluster_and_umap":
+                n_clusters = data.get("n_clusters", 0)
+                cluster_sizes = data.get("cluster_sizes", {})
+                top_clusters = sorted(cluster_sizes.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_clusters_str = ", ".join([f"Cluster {k}({v}细胞)" for k, v in top_clusters])
+                analysis_summary.append(f"**聚类分析**: 识别到 {n_clusters} 个细胞cluster，主要cluster: {top_clusters_str}")
+
+            elif tool_name == "find_marker_genes":
+                n_clusters = data.get("n_clusters", 0)
+                analysis_summary.append(f"**标记基因**: 为 {n_clusters} 个cluster识别了标记基因")
+
+            elif tool_name == "annotate_cells":
+                annotations = data.get("annotations", {})
+                n_annotated = data.get("n_annotated", 0)
+                coverage = data.get("coverage", 0)
+                cell_type_counts = data.get("cell_type_counts", {})
+                analysis_summary.append(f"**细胞注释**: 成功注释 {n_annotated}/{n_clusters} 个cluster (覆盖率 {coverage*100:.0f}%)")
+
+                # 列出识别的细胞类型
+                identified_types = [k for k, v in cell_type_counts.items() if k not in ["Cluster_0", "Cluster_1", "Cluster_2"]]
+                if identified_types:
+                    analysis_summary.append(f"  识别的细胞类型: {', '.join(identified_types)}")
+
+        except Exception as e:
+            logger.warning(f"[Response] Failed to parse result for {tool_name}: {e}")
+
+
 def _format_execution_summary(state: AgentState) -> Optional[str]:
     """Build a user-facing summary based on executed tool results."""
     analysis_notes = state.get("analysis_notes") or {}
@@ -313,13 +402,38 @@ def _format_execution_summary(state: AgentState) -> Optional[str]:
         lines.append("请确认是否需要我尝试自动修复数据格式问题（例如基因名冲突），或直接停止本次分析。")
         return "\n".join(lines)
 
-    lines.append("分析完成。")
-    if completed_tools:
-        lines.append(f"- 完成步骤：{', '.join(completed_tools)}")
+    # 生成成功的分析结果响应
+    lines.append("## 🎉 分析完成！")
+    lines.append("")
+
+    # 添加分析解读
+    interpretation = _generate_analysis_interpretation(state, tool_runs)
+    if interpretation:
+        lines.append("### 📊 分析结果解读")
+        lines.append(interpretation)
+        lines.append("")
+
+    # 添加可视化图表
+    plot_files = _collect_plot_files(state)
+    if plot_files:
+        lines.append("### 📈 可视化图表")
+        for plot in plot_files[:4]:  # 最多显示4张图
+            plot_name = plot["name"].replace("_", " ").title()
+            lines.append(f"**{plot_name}**")
+            if plot.get("url_path"):
+                lines.append(f"![{plot_name}]({plot['url_path']})")
+            lines.append("")
+
+    # 添加数据文件路径（可折叠）
     if artifacts:
-        lines.append("- 产出文件：")
+        lines.append("### 📁 产出文件")
+        lines.append("<details>")
+        lines.append("<summary>点击展开查看所有文件路径</summary>")
+        lines.append("")
         for path in artifacts:
-            lines.append(f"  • {path}")
+            lines.append(f"  • `{path}`")
+        lines.append("</details>")
+
     return "\n".join(lines)
 
 
