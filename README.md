@@ -1,194 +1,532 @@
-# 🚀 Genomix Agent 微服务启动指南
+# 🧬 CellMind: AI-Powered Single-Cell Multi-Omics Analysis Platform
 
-## 架构说明
+[![Python](https://img.shields.io/badge/Python-76.4%25-blue)]()
+[![TypeScript](https://img.shields.io/badge/TypeScript-23.5%25-green)]()
+[![FastAPI](https://img.shields.io/badge/FastAPI-latest-009688)]()
+[![LangGraph](https://img.shields.io/badge/LangGraph-Agent_Orchestration-FF6B6B)]()
 
-本项目采用微服务架构,将 scGPT 功能独立为单独的服务:
-
-- **主服务 (Port 8000)**: FastAPI + LangGraph + LangChain
-- **scGPT 服务 (Port 8001)**: 独立的 scGPT embeddings 提取服务
+**CellMind** is an intelligent platform for single-cell multi-omics analysis that leverages Large Language Models (LLMs) and agentic AI to automate complex biological data analysis workflows. It combines scGPT embeddings with LangGraph-based reasoning agents to provide intuitive, AI-driven insights from single-cell RNA-seq and related genomic data.
 
 ---
 
-## 📦 本地开发启动
+## ✨ Key Features
 
-### 方式 1: 手动启动 (开发推荐)
+- 🤖 **AI-Powered Agent System**: LLM-driven multi-step reasoning agents orchestrated via LangGraph
+- 🧪 **Multi-Omics Analysis**: Support for single-cell RNA-seq (scRNA-seq) analysis with scGPT embeddings
+- 🔌 **Microservices Architecture**: Independent scGPT embedding service for scalability
+- 🚀 **Real-time Streaming**: Stream analysis progress and LLM outputs in real-time
+- 📊 **Data Visualization**: Interactive plots and results using Plotly and Streamlit
+- 🔍 **RAG Integration**: Retrieval-Augmented Generation with Chroma vector store
+- 🐳 **Docker Support**: Production-ready Docker Compose setup
+- 🗣️ **Conversational Interface**: Multi-turn conversations with persistent thread support
 
-#### 1. 启动 scGPT 服务
+---
+
+## 🏗️ Architecture
+
+CellMind uses a **microservices architecture** to isolate dependencies and enable independent scaling:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Client Layer                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐    │
+│  │ CLI (Python) │  │ Web UI (API) │  │ Streamlit App  │    │
+│  └──────────────┘  └──────────────┘  └────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+        ┌───────────────────────────────────────┐
+        │   Main Service (Port 8000)            │
+        │  FastAPI + LangGraph + LangChain      │
+        │  ┌─────────────────────────────────┐  │
+        │  │ LangGraph Agent Orchestrator    │  │
+        │  │ ├─ Planner                      │  │
+        │  │ ├─ Executor                     │  │
+        │  │ └─ Reasoner                     │  │
+        │  └─────────────────────────────────┘  │
+        │  ┌─────────────────────────────────┐  │
+        │  │ LLM Integration                 │  │
+        │  │ ├─ OpenAI (GPT-4/3.5)           │  │
+        │  │ ├─ Ollama (Local Models)        │  │
+        │  │ └─ HuggingFace Models           │  │
+        │  └─────────────────────────────────┘  │
+        └────────────────┬──────────────────────┘
+                         ↓
+        ┌────────────────────────────────┐
+        │ scGPT Service (Port 8001)      │
+        │ Single-Cell Embedding Engine   │
+        │ ├─ scGPT Model                 │
+        │ ├─ scANpy Integration          │
+        │ └─ H5AD Processing             │
+        └────────────────────────────────┘
+```
+
+### Components
+
+| Service | Port | Purpose | Framework |
+|---------|------|---------|-----------|
+| **Main Service** | 8000 | API & Agent Orchestration | FastAPI + LangGraph |
+| **scGPT Service** | 8001 | Cell Embedding Generation | FastAPI + scGPT |
+
+**Why Microservices?**
+- 🔓 **Dependency Isolation**: Different PyTorch versions (Main: 2.5.x, scGPT: 2.1.x)
+- 📈 **Independent Scaling**: Scale scGPT service separately for GPU-bound workloads
+- 🛡️ **Fault Isolation**: Service failure doesn't cascade
+- ⚡ **Faster Development**: Main service startup unaffected by scGPT dependencies
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- **Python 3.9+**
+- **Node.js 18+** (for TypeScript components)
+- **Docker & Docker Compose** (optional, for production)
+- **CUDA 11.8+** (optional, for GPU acceleration)
+
+### Option 1: Local Development (Recommended)
+
+#### Step 1: Clone & Setup Environment
+
 ```bash
-# 创建独立的 conda 环境 (可选)
-conda create -n genomix-scgpt python=3.10
-conda activate genomix-scgpt
+git clone https://github.com/liu-shiqiang/CellMind.git
+cd CellMind
 
-# 安装 scGPT 服务依赖
+# Create main environment
+conda create -n cellmind python=3.10
+conda activate cellmind
+
+# Create scGPT environment (optional, for development)
+conda create -n cellmind-scgpt python=3.10
+```
+
+#### Step 2: Start scGPT Service (In separate terminal)
+
+```bash
+conda activate cellmind-scgpt
+
+# Install scGPT dependencies
 pip install -r requirements-scgpt.txt
 
-# 启动服务
+# Start the service
 uvicorn src.scgpt_service.main:app --reload --host 0.0.0.0 --port 8001
 ```
 
-#### 2. 启动主服务 (新终端)
-```bash
-# 使用主环境
-conda activate genomix
+Expected output:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8001
+INFO:     Application startup complete
+```
 
-# 安装主服务依赖
+#### Step 3: Start Main Service (In new terminal)
+
+```bash
+conda activate cellmind
+
+# Install main dependencies
 pip install -r requirements-main.txt
 
-# 启动服务
+# Start the main service
 uvicorn src.web.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-#### 3. 启动 Streamlit UI (可选,新终端)
-```bash
-conda activate genomix
-streamlit run ui/app.py
+Expected output:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000
+INFO:     Application startup complete
 ```
 
----
+#### Step 4: Run CLI or Web UI
 
-### 方式 2: Docker Compose (生产推荐)
+**CLI Mode (Interactive)**:
+```bash
+python main_CLI.py --stream
+
+# Follow prompts:
+# 1. Enter analysis task (e.g., "Cell Type Annotation")
+# 2. Provide H5AD file or skip
+# 3. Watch real-time progress with streaming events
+```
+
+**Web UI (Optional)**:
+```bash
+streamlit run ui/app.py
+# Opens at http://localhost:8501
+```
+
+### Option 2: Docker Compose (Production)
 
 ```bash
-# 构建并启动所有服务
+# Build and start all services
 docker-compose up --build
 
-# 后台运行
+# Run in background
 docker-compose up -d --build
 
-# 查看日志
+# View logs
 docker-compose logs -f
 
-# 停止服务
+# Stop services
 docker-compose down
 ```
 
 ---
 
-## 🔍 验证服务状态
+## 📝 Usage
 
-### 检查主服务
+### CLI Examples
+
+#### Basic Single-Cell Analysis
+
 ```bash
-curl http://localhost:8000/docs
+# Start interactive CLI
+python main_CLI.py --stream
+
+# Enter task: "Annotate cell types"
+# Upload file: /path/to/data.h5ad
+# View real-time analysis progress
 ```
 
-### 检查 scGPT 服务
+#### Specify Model
+
 ```bash
-curl http://localhost:8001/health
+python main_CLI.py \
+  --file /path/to/data.h5ad \
+  --model gpt-4 \
+  --stream
+
+# Alternative models:
+# - gpt-4 (OpenAI)
+# - gpt-3.5-turbo
+# - ollama_deepseek-r1:14b (local)
+# - mistral (local via Ollama)
 ```
 
-**预期响应**:
-```json
-{
-  "status": "healthy",
-  "service": "scgpt",
-  "version": "1.0.0",
-  "scgpt_available": true
-}
-```
+#### With Persistence
 
----
-
-## 🔧 配置说明
-
-### 环境变量
-
-**主服务 (.env)**:
 ```bash
-# scGPT 服务地址
-SCGPT_SERVICE_URL=http://localhost:8001
+python main_CLI.py --thread_id my-session-id --stream
 
-# API 地址
-GENOMIX_AGENT_API=http://localhost:8000
+# Same thread_id maintains conversation history
+# Useful for iterative analysis
 ```
 
-**scGPT 服务 (.env.scgpt)**:
-```bash
-# 服务端口
-SCGPT_SERVICE_PORT=8001
-```
+### API Examples
 
----
-
-## 📝 使用示例
-
-### API 调用示例
-
-#### 1. 提取 scGPT embeddings
+#### Embed Cells via scGPT
 
 ```bash
 curl -X POST "http://localhost:8001/embeddings" \
   -H "Content-Type: application/json" \
   -d '{
-    "file_path": "/path/to/data.h5ad",
+    "file_path": "/app/data/sample.h5ad",
     "model_name": "scgpt"
   }'
 ```
 
-#### 2. 使用主服务 (自动调用 scGPT)
+#### Run Analysis via Main API
 
 ```bash
 curl -X POST "http://localhost:8000/api/v2/agent/run" \
   -H "Content-Type: application/json" \
   -d '{
-    "objective": "提取细胞 embeddings",
-    "input_files": ["/path/to/data.h5ad"]
+    "objective": "Identify marker genes for each cell type",
+    "input_files": ["/app/data/sample.h5ad"],
+    "model": "gpt-4"
   }'
 ```
 
----
+#### Check Service Health
 
-## 🐛 故障排查
-
-### 问题 1: scGPT 服务连接失败
-```
-错误: 无法连接到 scGPT 服务
-解决:
-1. 检查 scGPT 服务是否启动: curl http://localhost:8001/health
-2. 检查环境变量: echo $SCGPT_SERVICE_URL
-3. 查看 scGPT 服务日志
-```
-
-### 问题 2: torch/torchtext 版本冲突
-```
-错误: Symbol not found: __ZN3c105ErrorC1E...
-解决:
-1. 主服务: pip install -r requirements-main.txt
-2. scGPT 服务: pip install -r requirements-scgpt.txt
-3. 确保使用独立的 conda 环境
-```
-
-### 问题 3: Docker 内存不足
 ```bash
-# 增加 Docker 内存限制
-docker-compose down
-# 在 Docker 设置中增加内存到至少 8GB
-docker-compose up
+# Main service
+curl http://localhost:8000/docs
+
+# scGPT service
+curl http://localhost:8001/health
 ```
 
 ---
 
-## 📊 服务监控
+## 🔧 Configuration
 
-### 主服务 API 文档
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+### Environment Variables
 
-### scGPT 服务 API 文档
-- Swagger UI: http://localhost:8001/docs
+Create `.env` file in project root:
+
+```bash
+# LLM Configuration
+OPENAI_API_KEY=your-api-key-here
+OLLAMA_BASE_URL=http://localhost:11434
+
+# Service URLs
+SCGPT_SERVICE_URL=http://localhost:8001
+GENOMIX_AGENT_API=http://localhost:8000
+
+# Data Paths
+DATA_DIR=./data
+RUNS_DIR=./runs
+
+# Database
+DATABASE_URL=sqlite:///cellmind.db
+
+# RAG
+CHROMA_PATH=./chroma_db
+```
+
+### Supported LLM Backends
+
+| Backend | Configuration | Notes |
+|---------|---------------|-------|
+| **OpenAI** | `OPENAI_API_KEY` | GPT-4, GPT-3.5-turbo |
+| **Ollama** | `OLLAMA_BASE_URL` | Local models (Deepseek, Mistral, etc.) |
+| **HuggingFace** | `HF_TOKEN` | Open-source models |
 
 ---
 
-## 🎯 优势
+## 📊 Analysis Capabilities
 
-✅ **依赖隔离**: 主服务和 scGPT 服务使用不同的 PyTorch 版本
-✅ **独立扩展**: scGPT 服务可以单独扩展资源
-✅ **故障隔离**: scGPT 服务崩溃不影响主服务
-✅ **开发效率**: 主服务启动不再受 scGPT 依赖影响
-✅ **部署灵活**: 可以将 scGPT 服务部署到 GPU 服务器
+CellMind supports various single-cell analysis tasks:
+
+- 🏷️ **Cell Type Annotation** - Identify and label cell types
+- 🧬 **Gene Expression Analysis** - Analyze expression patterns
+- 🛣️ **Pathway Enrichment** - Identify enriched biological pathways
+- 🕸️ **Gene Regulatory Networks** - Infer GRN structure
+- 📈 **Differential Expression** - Compare cell states
+- 🔗 **Cell-Cell Interactions** - Predict intercellular communication
+- 📍 **Spatial Analysis** - Integrate spatial transcriptomics data
 
 ---
 
-## 📚 更多信息
+## 📂 Project Structure
 
-- LangGraph 文档: https://docs.langchain.com/langgraph
-- scGPT 仓库: https://github.com/bowang-lab/scGPT
+```
+CellMind/
+├── src/
+│   ├── web/                    # FastAPI main service
+│   │   ├── main.py            # Application entry point
+│   │   ├── config.py          # Configuration
+│   │   └── routes/            # API endpoints
+│   │
+│   ├── scgpt_service/         # scGPT embedding service
+│   │   └── main.py            # Embedding service entry point
+│   │
+│   ├── utils/                  # Shared utilities
+│   │   ├── path_manager.py    # File path handling
+│   │   └── langgraph_stream.py # Event streaming
+│   │
+│   └── scripts/                # Helper scripts
+│       └── utils.py
+│
+├── cellmind/                   # Frontend TypeScript components
+│   └── README.md
+│
+├── data/                       # Sample data directory
+├── data_process/              # Data processing scripts
+├── config/                    # Configuration files
+│
+├── main_CLI.py                # CLI entry point
+├── test_llm_annotation.py     # Test suite
+│
+├── Dockerfile.main            # Main service container
+├── Dockerfile.scgpt           # scGPT service container
+├── docker-compose.yml         # Multi-service orchestration
+│
+├── requirements-main.txt      # Main service dependencies
+├── requirements-scgpt.txt     # scGPT service dependencies
+│
+├── thesis_chapter4.md         # Documentation
+├── thesis_chapter5.md         # Documentation
+└── README.md                  # This file
+```
+
+---
+
+## 🔍 Troubleshooting
+
+### Problem: scGPT Service Connection Failed
+
+```
+Error: Failed to connect to scGPT service at http://localhost:8001
+```
+
+**Solution:**
+```bash
+# 1. Verify scGPT service is running
+curl http://localhost:8001/health
+
+# 2. Check environment variable
+echo $SCGPT_SERVICE_URL
+
+# 3. View scGPT service logs
+docker logs genomix-scgpt  # if using Docker
+# or check terminal output
+```
+
+### Problem: PyTorch/Torch Version Conflict
+
+```
+Error: Symbol not found: __ZN3c105ErrorC1E...
+```
+
+**Solution:**
+```bash
+# Use separate conda environments
+conda activate cellmind-scgpt
+pip install -r requirements-scgpt.txt
+
+conda activate cellmind
+pip install -r requirements-main.txt
+```
+
+### Problem: Out of Memory (GPU/RAM)
+
+```
+Error: CUDA out of memory
+or RuntimeError: unable to allocate X.XX GiB
+```
+
+**Solution:**
+```bash
+# For Docker: Increase memory allocation
+docker update --memory 16g genomix-main
+docker update --memory 16g genomix-scgpt
+
+# For local: Check available resources
+nvidia-smi  # GPU memory
+free -h     # System memory
+```
+
+### Problem: H5AD File Not Found
+
+```
+Error: File not found: /path/to/data.h5ad
+```
+
+**Solution:**
+```bash
+# Verify file path
+ls -lh /path/to/data.h5ad
+
+# Check file format
+file /path/to/data.h5ad
+# Should show: HDF5 file
+
+# Run with absolute path
+python main_CLI.py --file /absolute/path/to/data.h5ad
+```
+
+---
+
+## 📚 API Documentation
+
+### Interactive Docs
+
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+### Key Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/v2/agent/run` | POST | Run analysis task |
+| `/api/v2/health` | GET | Service health check |
+| `/embeddings` | POST | Generate scGPT embeddings |
+| `/docs` | GET | Interactive API documentation |
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run test suite
+pytest test_llm_annotation.py -v
+
+# Test with specific model
+python test_llm_annotation.py --model gpt-4
+
+# Generate test report
+pytest test_llm_annotation.py --html=report.html
+```
+
+---
+
+## 🛠️ Development
+
+### Install Development Dependencies
+
+```bash
+pip install -r requirements-main.txt
+pip install pytest pytest-asyncio black flake8 mypy
+```
+
+### Code Quality
+
+```bash
+# Format code
+black src/ main_CLI.py
+
+# Lint
+flake8 src/ main_CLI.py
+
+# Type check
+mypy src/ main_CLI.py
+```
+
+### Build Docker Images
+
+```bash
+# Build main service
+docker build -f Dockerfile.main -t cellmind:latest .
+
+# Build scGPT service
+docker build -f Dockerfile.scgpt -t cellmind-scgpt:latest .
+```
+
+---
+
+## 📖 Background & Theory
+
+For detailed information about the algorithms and methodology, see:
+- `thesis_chapter4.md` - Theoretical foundations
+- `thesis_chapter5.md` - Implementation details
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+---
+
+## 📄 License
+
+This project is open source. See LICENSE file for details.
+
+---
+
+## 🙏 Acknowledgments
+
+- **scGPT**: Cell foundation model from [bowang-lab/scGPT](https://github.com/bowang-lab/scGPT)
+- **LangGraph**: Multi-agent orchestration from [LangChain](https://docs.langchain.com/langgraph)
+- **ScanPy**: Single-cell analysis toolkit
+- **FastAPI**: Modern Python web framework
+
+---
+
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/liu-shiqiang/CellMind/issues)
+- **Documentation**: See markdown files in project root
+- **API Docs**: Run service and visit `/docs` endpoint
+
+---
+
+**Last Updated**: June 2026
+**Version**: 1.0.0
