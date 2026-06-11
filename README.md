@@ -4,6 +4,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-23.5%25-green)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-latest-009688)]()
 [![LangGraph](https://img.shields.io/badge/LangGraph-Agent_Orchestration-FF6B6B)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **CellMind** is an intelligent platform for single-cell multi-omics analysis that leverages Large Language Models (LLMs) and agentic AI to automate complex biological data analysis workflows. It combines scGPT embeddings with LangGraph-based reasoning agents to provide intuitive, AI-driven insights from single-cell RNA-seq and related genomic data.
 
@@ -507,7 +508,25 @@ Contributions are welcome! Please:
 
 ## 📄 License
 
-This project is open source. See LICENSE file for details.
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+### MIT License Summary
+
+The MIT License is a permissive open-source license that allows:
+
+✅ **Commercial use** - You can use this project for commercial purposes  
+✅ **Modification** - You can modify the source code  
+✅ **Distribution** - You can distribute copies of the software  
+✅ **Private use** - You can use this privately  
+
+❌ **Liability** - The software is provided "as-is" without warranty  
+❌ **Warranty** - No warranty or guarantee is provided
+
+**Requirements:**
+- Include a copy of the LICENSE file with any distribution
+- Include a copyright notice and license statement
+
+For the full MIT License text, please refer to the [LICENSE](LICENSE) file in this repository.
 
 ---
 
@@ -528,5 +547,6 @@ This project is open source. See LICENSE file for details.
 
 ---
 
-**Last Updated**: June 2026
-**Version**: 1.0.0
+**Last Updated**: June 2026  
+**Version**: 1.0.0  
+**License**: MIT
